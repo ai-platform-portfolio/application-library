@@ -1,0 +1,32 @@
+name: Agent factory
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  issue:
+    if: github.event_name == 'pull_request'
+    uses: ai-platform-portfolio/ops-shared/.github/workflows/linear-issue-check.yml@7ed775ef5c3077a99f49e859816ffc095c54d18a
+    secrets:
+      LINEAR_CLIENT_ID: ${{ secrets.LINEAR_CLIENT_ID }}
+      LINEAR_CLIENT_SECRET: ${{ secrets.LINEAR_CLIENT_SECRET }}
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - run: python -m pip install ./agent-factory
+      - run: python -m unittest discover -s agent-factory/tests -v
+      - run: python -m pip wheel --no-deps ./agent-factory --wheel-dir /tmp/agent-factory-dist
