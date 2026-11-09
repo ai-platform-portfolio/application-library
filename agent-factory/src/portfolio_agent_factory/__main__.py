@@ -12,7 +12,7 @@ from .publish import create_draft, version_request
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["validate", "publish", "release", "serve", "broker"])
+    parser.add_argument("command", choices=["validate", "publish", "release", "candidate", "serve", "broker"])
     parser.add_argument("--agent", type=Path)
     parser.add_argument("--image")
     parser.add_argument("--revision")
@@ -20,6 +20,8 @@ def main():
     parser.add_argument("--smoke", type=Path)
     parser.add_argument("--incident", type=Path)
     parser.add_argument("--namespace")
+    parser.add_argument("--version")
+    parser.add_argument("--base-version")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
@@ -30,11 +32,11 @@ def main():
         return
 
     if args.command == "broker":
-        if not args.agent or not args.incident or not args.namespace or not args.project_endpoint:
-            parser.error("broker requires --agent, --incident, --namespace and --project-endpoint")
+        if not args.agent or not args.incident or not args.namespace or not args.version or not args.project_endpoint:
+            parser.error("broker requires --agent, --incident, --namespace, --version and --project-endpoint")
         from .broker import main as investigate
 
-        investigate(args.agent, args.incident, args.project_endpoint, args.namespace)
+        investigate(args.agent, args.incident, args.project_endpoint, args.namespace, args.version)
         return
 
     if args.command == "validate":
@@ -50,7 +52,7 @@ def main():
         return
 
     if args.agent is None or not args.image or not args.revision:
-        parser.error("publish/release require --agent, --image and --revision")
+        parser.error("publish/release/candidate require --agent, --image and --revision")
     request = version_request(load_agent(args.agent), args.image, args.revision, draft=args.command == "publish")
     if args.apply:
         if not args.project_endpoint:
@@ -61,6 +63,13 @@ def main():
             from .release import release_and_smoke
 
             result = release_and_smoke(args.project_endpoint, request, json.loads(args.smoke.read_text()))
+            print(json.dumps(result, default=str))
+        elif args.command == "candidate":
+            if not args.smoke or not args.base_version:
+                parser.error("candidate --apply requires --smoke and --base-version")
+            from .release import candidate_and_smoke
+
+            result = candidate_and_smoke(args.project_endpoint, request, json.loads(args.smoke.read_text()), args.base_version)
             print(json.dumps(result, default=str))
         else:
             version = create_draft(args.project_endpoint, request)

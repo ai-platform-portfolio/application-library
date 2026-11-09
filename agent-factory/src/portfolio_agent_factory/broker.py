@@ -12,10 +12,10 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from .diagnostics import KubernetesDiagnostics, TOOL_DESCRIPTIONS, target
 from .manifest import load_agent
-from .release import smoke
+from .release import create_pinned_session, smoke
 
 
-def run_broker(agent, incident: dict, project_endpoint: str, namespace: str, *, credential=None, executor=None, invoker=None) -> dict:
+def run_broker(agent, incident: dict, project_endpoint: str, namespace: str, *, version=None, credential=None, executor=None, invoker=None, session_id=None) -> dict:
     """Keep the bounded tool loop in the broker; no Kubernetes token enters Foundry."""
     target(incident, namespace)
     if not agent.tools or not set(agent.tools) <= set(TOOL_DESCRIPTIONS):
@@ -23,14 +23,17 @@ def run_broker(agent, incident: dict, project_endpoint: str, namespace: str, *, 
     credential = credential or DefaultAzureCredential()
     executor = executor or KubernetesDiagnostics()
     invoker = invoker or smoke
+    if version:
+        session_id = session_id or create_pinned_session(project_endpoint, agent.id, version, credential)
     history = []
 
     for _ in range(agent.max_requests):
-        result = invoker(project_endpoint, agent.id, {"incident": incident, "history": history}, credential)
+        kwargs = {"session_id": session_id} if session_id else {}
+        result = invoker(project_endpoint, agent.id, {"incident": incident, "history": history}, credential, **kwargs)
         if result.get("status") == "final":
             if not isinstance(result.get("answer"), str) or not result["answer"].strip():
                 raise ValueError("Agent returned an empty final answer")
-            return {"agent": agent.id, "target": {"namespace": namespace, "workload": incident["workload"]},
+            return {"agent": agent.id, "version": version, "target": {"namespace": namespace, "workload": incident["workload"]},
                     "answer": result["answer"], "tool_calls": [entry["name"] for entry in history],
                     "model_requests": len(history) + 1, "trace_id": result.get("trace_id")}
 
@@ -54,7 +57,7 @@ def run_broker(agent, incident: dict, project_endpoint: str, namespace: str, *, 
     raise RuntimeError("Model-request limit reached")
 
 
-def main(agent_path: Path, incident_path: Path, project_endpoint: str, namespace: str):
+def main(agent_path: Path, incident_path: Path, project_endpoint: str, namespace: str, version: str):
     agent = load_agent(agent_path)
     incident = json.loads(incident_path.read_text())
     provider = TracerProvider(resource=Resource.create({"service.name": "foundry-diagnostic-broker"}))
@@ -65,7 +68,7 @@ def main(agent_path: Path, incident_path: Path, project_endpoint: str, namespace
     try:
         with trace.get_tracer(__name__).start_as_current_span("agent.investigation") as span:
             span.set_attribute("langfuse.export", "true")
-            result = run_broker(agent, incident, project_endpoint, namespace)
+            result = run_broker(agent, incident, project_endpoint, namespace, version=version)
             result["broker_trace_id"] = f"{span.get_span_context().trace_id:032x}"
             print(json.dumps(result))
     finally:

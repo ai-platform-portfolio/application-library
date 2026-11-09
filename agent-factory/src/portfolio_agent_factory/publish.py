@@ -113,3 +113,36 @@ def create_first_release(project_endpoint: str, request: dict, credential=None):
             environment_variables=definition["environment_variables"],
         ),
     )
+
+
+def create_candidate_release(project_endpoint: str, request: dict, credential=None):
+    """Create or reuse one immutable regular version after routing is pinned."""
+    from azure.ai.projects import AIProjectClient
+    from azure.ai.projects.models import ContainerConfiguration, HostedAgentDefinition, ProtocolVersionRecord
+    from azure.identity import DefaultAzureCredential
+
+    if request["draft"] or not project_endpoint.startswith("https://") or "/api/projects/" not in project_endpoint:
+        raise ValueError("Candidate needs a non-draft request and Foundry HTTPS project endpoint")
+    client = AIProjectClient(project_endpoint, credential or DefaultAzureCredential())
+    for version in client.agents.list_versions(request["agent_name"], include_drafts=True):
+        metadata = version.metadata or {}
+        if metadata.get("source_revision") != request["metadata"]["source_revision"]:
+            continue
+        if metadata.get("image_digest") != request["metadata"]["image_digest"]:
+            raise ValueError("Revision already exists with a different image")
+        if not str(version.version).startswith("draft-"):
+            return version
+
+    definition = request["definition"]
+    return client.agents.create_version(
+        agent_name=request["agent_name"],
+        draft=False,
+        metadata=request["metadata"],
+        definition=HostedAgentDefinition(
+            container_configuration=ContainerConfiguration(**definition["container_configuration"]),
+            cpu=definition["cpu"],
+            memory=definition["memory"],
+            protocol_versions=[ProtocolVersionRecord(**item) for item in definition["protocol_versions"]],
+            environment_variables=definition["environment_variables"],
+        ),
+    )

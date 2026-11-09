@@ -3,6 +3,10 @@ agent:
   image: ""
   revision: ""
 
+release:
+  mode: first
+  baseVersion: ""
+
 publisher:
   serviceAccountName: foundry-publisher
   identityConfigMap: foundry-publisher-identity
