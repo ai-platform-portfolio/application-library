@@ -8,6 +8,7 @@ import yaml
 
 
 _ID = re.compile(r"^[a-z][a-z0-9-]{1,48}$")
+_TOOL_ID = re.compile(r"^[a-z][a-z0-9_]{1,48}$")
 _HANDLER = re.compile(r"^[a-zA-Z_][\w]*(?:\.[a-zA-Z_][\w]*)*:[a-zA-Z_][\w]*$")
 
 
@@ -51,8 +52,8 @@ def load_agent(path: Path) -> Agent:
     if type(limits.get("tool_calls")) is not int or not 0 <= limits["tool_calls"] <= 30:
         raise ValueError("Invalid tool call limit")
     tools = data.get("tools", [])
-    if not isinstance(tools, list) or any(not isinstance(name, str) or not _ID.fullmatch(name) for name in tools):
-        raise ValueError("Agent tools must be lower-case names")
+    if not isinstance(tools, list) or any(not isinstance(name, str) or not _TOOL_ID.fullmatch(name) for name in tools):
+        raise ValueError("Agent tools must be lower-case snake-case names")
     if len(tools) != len(set(tools)) or len(tools) > limits["tool_calls"]:
         raise ValueError("Agent tools must be unique and within the tool-call limit")
     return Agent(
