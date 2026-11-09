@@ -25,7 +25,7 @@ def version_request(agent: Agent, image: str, revision: str, *, draft: bool = Tr
             "memory": "2Gi",
             "protocol_versions": [{"protocol": agent.protocol, "version": "2.0.0"}],
             "environment_variables": {
-                "AGENT_MANIFEST": f"agents/{agent.id}.yaml",
+                "PORTFOLIO_MANIFEST_PATH": f"agents/{agent.id}.yaml",
                 "MODEL_DEPLOYMENT_NAME": agent.model,
                 "PYTHONNOUSERSITE": "1",
             },

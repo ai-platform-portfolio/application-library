@@ -15,7 +15,7 @@ def build_app():
     from opentelemetry import trace
     from starlette.responses import JSONResponse
 
-    manifest = load_agent(Path(os.environ["AGENT_MANIFEST"]))
+    manifest = load_agent(Path(os.environ["PORTFOLIO_MANIFEST_PATH"]))
     module_name, function_name = manifest.handler.split(":", 1)
     handler = getattr(importlib.import_module(module_name), function_name)
     endpoint = os.environ["FOUNDRY_PROJECT_ENDPOINT"].rstrip("/")

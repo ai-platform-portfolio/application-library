@@ -37,7 +37,9 @@ class FactoryTests(unittest.TestCase):
             second = version_request(load_agent(agent_file(directory, "release")), IMAGE, REVISION)
 
         self.assertEqual(first["definition"]["protocol_versions"], [{"protocol": "invocations", "version": "2.0.0"}])
-        self.assertEqual(first["definition"]["environment_variables"]["AGENT_MANIFEST"], "agents/capacity.yaml")
+        environment = first["definition"]["environment_variables"]
+        self.assertEqual(environment["PORTFOLIO_MANIFEST_PATH"], "agents/capacity.yaml")
+        self.assertFalse(any(key.startswith(("AGENT_", "FOUNDRY_")) for key in environment))
         self.assertEqual(second["agent_name"], "release")
         self.assertTrue(first["draft"])
         with tempfile.TemporaryDirectory() as directory:
