@@ -60,7 +60,9 @@ the hosted handler returns one tool request per invocation. The broker executes
 only its fixed read-only registry, passes at most 24 KiB per result back as
 explicitly untrusted evidence, and stops at the manifest's request/tool limits.
 The Job receives one approved namespace and an image-bundled incident file.
-Its Kubernetes token stays in AKS. Tool results are not persisted by this Job.
+Its chart creates a RoleBinding only in that namespace and removes it when the
+release is uninstalled. The Kubernetes token stays in AKS. Tool results are
+not persisted by this Job.
 
 The current registry reads Deployment and Pod state, recent target events,
 bounded Pod logs and fixed Mimir CPU/restart queries. It cannot run shell

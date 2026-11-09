@@ -9,7 +9,7 @@ from portfolio_agent_factory.publish import create_draft, create_first_release, 
 from portfolio_agent_factory.model import model_client
 from portfolio_agent_factory.release import smoke, wait_active
 from portfolio_agent_factory.broker import run_broker
-from portfolio_agent_factory.diagnostics import KubernetesDiagnostics
+from portfolio_agent_factory.diagnostics import KubernetesDiagnostics, redact
 
 
 IMAGE = "registry.example.test/agents/catalog@sha256:" + "a" * 64
@@ -85,6 +85,13 @@ class FactoryTests(unittest.TestCase):
         self.assertEqual(api.get.call_args_list[1].kwargs["params"]["labelSelector"], "app=web")
         with self.assertRaisesRegex(ValueError, "read-only registry"):
             KubernetesDiagnostics(api_client=api, metrics_client=Mock()).execute("delete_pod", {}, "staging")
+
+    def test_common_credentials_are_masked_before_log_evidence(self):
+        value = 'Authorization: Bearer abc.def password="secret" api_key=hidden'
+        redacted = redact(value)
+        for secret in ("abc.def", "secret", "hidden"):
+            self.assertNotIn(secret, redacted)
+        self.assertIn("[REDACTED]", redacted)
 
     def test_two_consumers_share_defaults_and_digest_policy(self):
         with tempfile.TemporaryDirectory() as directory:

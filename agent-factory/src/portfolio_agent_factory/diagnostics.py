@@ -15,7 +15,13 @@ TOOL_DESCRIPTIONS = {
 }
 
 _DNS_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
-_REDACT = re.compile(r"(?i)(authorization|bearer|password|api[_-]?key|token)(\s*[:=]\s*|\s+)[^\s,;]+")
+_BEARER = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/-]+")
+_FIELD = re.compile(r"(?i)(\"?(?:authorization|password|api[_-]?key|token)\"?\s*[:=]\s*\"?)[^\"\s,;]+")
+
+
+def redact(value: str) -> str:
+    """Mask common credential forms; callers must still treat logs as sensitive."""
+    return _FIELD.sub(r"\1[REDACTED]", _BEARER.sub(r"\1[REDACTED]", value))
 
 
 def target(incident: dict, allowed_namespace: str) -> tuple[str, str]:
@@ -32,7 +38,9 @@ class KubernetesDiagnostics:
         if api_client is None:
             host = os.environ["KUBERNETES_SERVICE_HOST"]
             port = os.environ.get("KUBERNETES_SERVICE_PORT", "443")
-            token = open("/var/run/secrets/kubernetes.io/serviceaccount/token", encoding="utf-8").read()
+            from pathlib import Path
+
+            token = Path("/var/run/secrets/kubernetes.io/serviceaccount/token").read_text()
             api_client = httpx.Client(
                 base_url=f"https://{host}:{port}",
                 verify="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
@@ -102,7 +110,7 @@ class KubernetesDiagnostics:
             return {"events": [
                 {
                     "reason": event.get("reason"),
-                    "message": _REDACT.sub(r"\1\2[REDACTED]", str(event.get("message", "")))[:500],
+                    "message": redact(str(event.get("message", "")))[:500],
                     "kind": event.get("involvedObject", {}).get("kind"),
                     "object": event.get("involvedObject", {}).get("name"),
                     "time": event.get("lastTimestamp") or event.get("eventTime"),
@@ -118,7 +126,7 @@ class KubernetesDiagnostics:
             pod = pods[0]["name"]
             response = self.api.get(f"{prefix}/pods/{quote(pod)}/log", params={"tailLines": 50, "limitBytes": 8192, "timestamps": "true"})
             response.raise_for_status()
-            return {"pod": pod, "logs": _REDACT.sub(r"\1\2[REDACTED]", response.text[:8192]), "truncated": len(response.content) >= 8192}
+            return {"pod": pod, "logs": redact(response.text[:8192]), "truncated": len(response.content) >= 8192}
 
         queries = {
             "cpu_5m": f'sum(rate(container_cpu_usage_seconds_total{{namespace="{namespace}",pod=~"{workload}-.*"}}[5m]))',
