@@ -1,0 +1,26 @@
+agent:
+  id: ""
+  image: ""
+  revision: ""
+
+incident:
+  path: ""
+  namespace: ""
+
+broker:
+  serviceAccountName: foundry-diagnostic-broker
+  identityConfigMap: foundry-diagnostic-broker-identity
+  configMap: foundry-diagnostic-broker
+  otlpTracesEndpoint: http://opentelemetry-collector.opentelemetry.svc.cluster.local:4318/v1/traces
+  mimirQueryUrl: http://mimir-gateway.lgtm.svc.cluster.local/prometheus
+
+job:
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 900
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi

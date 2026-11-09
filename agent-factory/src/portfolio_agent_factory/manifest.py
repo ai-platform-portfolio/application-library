@@ -23,6 +23,7 @@ class Agent:
     reasoning_effort: str
     max_requests: int
     max_tool_calls: int
+    tools: tuple[str, ...] = ()
 
 
 def load_agent(path: Path) -> Agent:
@@ -49,9 +50,15 @@ def load_agent(path: Path) -> Agent:
         raise ValueError("Invalid model request limit")
     if type(limits.get("tool_calls")) is not int or not 0 <= limits["tool_calls"] <= 30:
         raise ValueError("Invalid tool call limit")
+    tools = data.get("tools", [])
+    if not isinstance(tools, list) or any(not isinstance(name, str) or not _ID.fullmatch(name) for name in tools):
+        raise ValueError("Agent tools must be lower-case names")
+    if len(tools) != len(set(tools)) or len(tools) > limits["tool_calls"]:
+        raise ValueError("Agent tools must be unique and within the tool-call limit")
     return Agent(
         id=data["id"], kind=data.get("kind", "hosted"), protocol=data.get("protocol", "invocations"),
         model=data["model"], handler=data["handler"], eval_suite=data["eval_suite"],
         instructions=data["instructions"], reasoning_effort=data["reasoning_effort"],
         max_requests=limits["model_requests"], max_tool_calls=limits["tool_calls"],
+        tools=tuple(tools),
     )
