@@ -2,14 +2,16 @@
 {{- $id := required "agent.id is required" $agent.id -}}
 {{- $image := required "agent.image is required" $agent.image -}}
 {{- $revision := required "agent.revision is required" $agent.revision -}}
+{{- $version := required "agent.version is required" $agent.version | toString -}}
 {{- $path := required "incident.path is required" .Values.incident.path -}}
 {{- $namespace := required "incident.namespace is required" .Values.incident.namespace -}}
 {{- if not (regexMatch "^[a-z][a-z0-9-]{1,48}$" $id) -}}{{- fail "agent.id must be a DNS label" -}}{{- end -}}
 {{- if not (regexMatch "^[a-f0-9]{40}$" $revision) -}}{{- fail "agent.revision must be a full Git commit SHA" -}}{{- end -}}
+{{- if not (regexMatch "^[0-9]+$" $version) -}}{{- fail "agent.version must be a concrete release number" -}}{{- end -}}
 {{- if not (regexMatch "^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$" $image) -}}{{- fail "agent.image must be registry-qualified and digest-pinned" -}}{{- end -}}
 {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $namespace) -}}{{- fail "incident.namespace must be a DNS label" -}}{{- end -}}
 {{- if not (regexMatch "^incidents/[a-z0-9-]+\\.json$" $path) -}}{{- fail "incident.path must be an image-bundled incidents/<name>.json file" -}}{{- end -}}
-{{- $run := sha256sum (printf "%s/%s/%s/%s/%s" $id $image $revision $namespace $path) | trunc 10 -}}
+{{- $run := sha256sum (printf "%s/%s/%s/%s/%s/%s" $id $image $revision $version $namespace $path) | trunc 10 -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -45,6 +47,8 @@ spec:
             - broker
             - --agent
             - {{ printf "agents/%s.yaml" $id | quote }}
+            - --version
+            - {{ $version | quote }}
             - --incident
             - {{ $path | quote }}
             - --namespace

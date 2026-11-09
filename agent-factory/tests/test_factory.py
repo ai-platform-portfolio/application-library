@@ -5,9 +5,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from portfolio_agent_factory.manifest import load_agent
-from portfolio_agent_factory.publish import create_draft, create_first_release, version_request
+from portfolio_agent_factory.publish import create_candidate_release, create_draft, create_first_release, version_request
 from portfolio_agent_factory.model import model_client
-from portfolio_agent_factory.release import smoke, wait_active
+from portfolio_agent_factory.release import candidate_and_smoke, require_pinned_route, smoke, wait_active
 from portfolio_agent_factory.broker import run_broker
 from portfolio_agent_factory.diagnostics import KubernetesDiagnostics, redact
 
@@ -57,6 +57,21 @@ class FactoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "approved namespace"):
             run_broker(agent, incident, "https://example.test/project", "production",
                        credential=object(), executor=executor, invoker=invoke)
+
+    def test_broker_reuses_a_pinned_session_for_every_tool_turn(self):
+        from unittest.mock import Mock
+
+        agent = SimpleNamespace(id="sre", tools=("workload_state",), max_requests=3, max_tool_calls=1)
+        incident = {"namespace": "staging", "workload": "web"}
+        replies = iter([{"status": "tool_request", "tool": "workload_state"},
+                        {"status": "final", "answer": "One ready replica"}])
+        invoker = Mock(side_effect=lambda *args, **kwargs: next(replies))
+        executor = Mock()
+        executor.execute.return_value = {"ready": 1}
+        run_broker(agent, incident, "https://example.test/project", "staging", version="2",
+                   session_id="pinned-session", credential=object(), executor=executor, invoker=invoker)
+        self.assertEqual([call.kwargs["session_id"] for call in invoker.call_args_list],
+                         ["pinned-session", "pinned-session"])
 
     def test_broker_rejects_unknown_tool_before_kubernetes_call(self):
         from unittest.mock import Mock
@@ -167,6 +182,53 @@ class FactoryTests(unittest.TestCase):
         result = smoke("https://foundry.example.services.ai.azure.com/api/projects/management", "capacity", {"incident": {"title": "test"}}, credential, client=sender)
         self.assertEqual(result["answer"], "Need evidence")
         sender.post.return_value.raise_for_status.assert_called_once()
+        smoke("https://foundry.example.services.ai.azure.com/api/projects/management", "capacity", {},
+              credential, client=sender, session_id="candidate-session")
+        self.assertEqual(sender.post.call_args.kwargs["params"]["agent_session_id"], "candidate-session")
+
+    def test_candidate_requires_fixed_route_and_reuses_exact_revision(self):
+        from unittest.mock import Mock
+
+        sender = Mock()
+        sender.get.return_value.json.return_value = {
+            "agent_endpoint": {
+                "version_selector": {"version_selection_rules": [
+                    {"agent_version": "1", "traffic_percentage": 100, "type": "FixedRatio"}]},
+                "protocol_configuration": {"invocations": {}},
+            },
+        }
+        credential = Mock()
+        credential.get_token.return_value.token = "token"
+        require_pinned_route("https://foundry.example.test/api/projects/management", "sre", "1", credential, client=sender)
+        sender.get.return_value.json.return_value["agent_endpoint"]["version_selector"]["version_selection_rules"][0]["agent_version"] = "@latest"
+        with self.assertRaisesRegex(ValueError, "not fixed"):
+            require_pinned_route("https://foundry.example.test/api/projects/management", "sre", "1", credential, client=sender)
+
+        with tempfile.TemporaryDirectory() as directory:
+            request = version_request(load_agent(agent_file(directory, "capacity")), IMAGE, REVISION, draft=False)
+        existing = SimpleNamespace(metadata=request["metadata"], version="2")
+        with patch("azure.ai.projects.AIProjectClient") as project:
+            project.return_value.agents.list_versions.return_value = [existing]
+            self.assertIs(create_candidate_release("https://foundry.example.test/api/projects/management", request, credential), existing)
+            project.return_value.agents.create_version.assert_not_called()
+
+    @patch("portfolio_agent_factory.release.smoke")
+    @patch("portfolio_agent_factory.release.create_pinned_session", return_value="candidate-session")
+    @patch("portfolio_agent_factory.release.wait_active")
+    @patch("portfolio_agent_factory.release.create_candidate_release")
+    @patch("portfolio_agent_factory.release.require_pinned_route")
+    @patch("portfolio_agent_factory.release.AIProjectClient")
+    def test_candidate_smoke_checks_route_and_invokes_only_pinned_version(self, project, route, create, active, session, invoke):
+        with tempfile.TemporaryDirectory() as directory:
+            request = version_request(load_agent(agent_file(directory, "capacity")), IMAGE, REVISION, draft=False)
+        create.return_value = SimpleNamespace(version="2")
+        active.return_value = SimpleNamespace(version="2", status="active")
+        invoke.return_value = {"status": "final", "answer": "Need evidence"}
+        result = candidate_and_smoke("https://foundry.example.test/api/projects/management", request,
+                                     {"incident": {"summary": "test"}}, "1", credential=object())
+        self.assertEqual(route.call_count, 2)
+        self.assertEqual(result["candidate_version"], "2")
+        self.assertEqual(invoke.call_args.kwargs["session_id"], "candidate-session")
 
     @patch("portfolio_agent_factory.model.OpenAI")
     @patch("portfolio_agent_factory.model.get_bearer_token_provider")

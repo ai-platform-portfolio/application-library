@@ -2,6 +2,7 @@ agent:
   id: ""
   image: ""
   revision: ""
+  version: ""
 
 incident:
   path: ""

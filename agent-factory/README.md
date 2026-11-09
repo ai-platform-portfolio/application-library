@@ -70,3 +70,21 @@ commands or accept model-generated Kubernetes paths or PromQL. GitOps owns the
 broker's service account, read-only RBAC and federated Foundry identity. This
 is a read-only investigation path; alert intake, durable incident state,
 candidate promotion and fix PRs remain separate delivery stages.
+
+## Candidate validation
+
+After an operator fixes the ordinary Invocations endpoint to the current
+numeric version at 100%, set `release.mode: candidate` and
+`release.baseVersion` to that version in the publisher chart. The Job verifies
+the route before and after creating or reusing the digest-pinned candidate,
+waits for it to become active, and sends its smoke input through a Foundry
+session pinned to the candidate version. It does not change endpoint routing.
+Do not use a draft as the isolation mechanism: subscriptions without draft
+support can create a regular version instead.
+
+The diagnostic chart requires `agent.version` as a concrete numeric version.
+Its broker creates one version-pinned session and uses it for every bounded
+tool turn, so validation never falls through to the ordinary endpoint. Reuse
+the candidate version and immutable image digest for repeat runs. Promotion,
+rollback and deletion of old versions remain separate operations and require
+evaluation evidence and review.

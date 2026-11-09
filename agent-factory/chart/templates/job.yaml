@@ -2,10 +2,17 @@
 {{- $image := required "agent.image is required" $agent.image -}}
 {{- $revision := required "agent.revision is required" $agent.revision -}}
 {{- $id := required "agent.id is required" $agent.id -}}
+{{- $mode := .Values.release.mode | default "first" -}}
+{{- if not (has $mode (list "first" "candidate")) -}}{{- fail "release.mode must be first or candidate" -}}{{- end -}}
+{{- $base := .Values.release.baseVersion | toString -}}
+{{- if and (eq $mode "candidate") (not (regexMatch "^[0-9]+$" $base)) -}}{{- fail "release.baseVersion must be a concrete release number" -}}{{- end -}}
 {{- if not (regexMatch "^[a-z][a-z0-9-]{1,48}$" $id) -}}{{- fail "agent.id must be a lower-case DNS label" -}}{{- end -}}
 {{- if not (regexMatch "^[a-f0-9]{40}$" $revision) -}}{{- fail "agent.revision must be a full Git commit SHA" -}}{{- end -}}
 {{- if not (regexMatch "^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$" $image) -}}{{- fail "agent.image must be registry-qualified and digest-pinned" -}}{{- end -}}
 {{- $run := sha256sum (printf "%s/%s/%s" $id $image $revision) | trunc 10 -}}
+{{- if eq $mode "candidate" -}}
+{{- $run = sha256sum (printf "%s/%s/%s/candidate/%s" $id $image $revision $base) | trunc 10 -}}
+{{- end -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -40,7 +47,7 @@ spec:
           imagePullPolicy: IfNotPresent
           command: [python, -m, portfolio_agent_factory]
           args:
-            - release
+            - {{ ternary "candidate" "release" (eq $mode "candidate") }}
             - --agent
             - {{ printf "agents/%s.yaml" $id | quote }}
             - --image
@@ -49,6 +56,10 @@ spec:
             - {{ $revision | quote }}
             - --smoke
             - {{ printf "smoke/%s.json" $id | quote }}
+            {{- if eq $mode "candidate" }}
+            - --base-version
+            - {{ $base | quote }}
+            {{- end }}
             - --apply
           env:
             - name: AZURE_CLIENT_ID
