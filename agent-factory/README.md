@@ -26,6 +26,26 @@ working directory and set `FOUNDRY_PROJECT_ENDPOINT`; the factory serves
 handler is imported from the manifest and receives the request payload,
 manifest, model client, deployment name and tracer.
 
+## First hosted release
+
+The shared `chart/` renders a short-lived Kubernetes Job that runs the same
+digest-pinned agent image from an AKS namespace with a federated publisher
+identity. Its only agent inputs are `agent.id`, `agent.image` and
+`agent.revision`; the Job derives the manifest and smoke paths and reads its
+Foundry project endpoint and Entra identity from shared ConfigMaps. A second
+agent uses the same chart unchanged. The image must include
+`smoke/<id>.json` with a structured, non-sensitive Invocations request.
+
+`python -m portfolio_agent_factory release` creates or reuses the first
+non-draft version, waits until Foundry reports `active`, then invokes the
+stable Invocations endpoint. It refuses a different release revision for an
+existing agent, because version changes need a separate candidate test and
+explicit promotion workflow. The caller exports a span to an optional
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and marks it for Langfuse. That span proves
+the private caller's release and invocation; it does not capture internal
+hosted-container spans. The existing `publish` command still prepares drafts
+for later candidate workflows and does not route traffic.
+
 Only HTTPS model endpoints are accepted. `MODEL_BASE_URL` and
 `MODEL_TOKEN_SCOPE` can select a later authenticated gateway route; the
 default uses the Foundry project and `https://ai.azure.com/.default`.

@@ -1,0 +1,21 @@
+agent:
+  id: ""
+  image: ""
+  revision: ""
+
+publisher:
+  serviceAccountName: foundry-publisher
+  identityConfigMap: foundry-publisher-identity
+  configMap: foundry-publisher
+  otlpTracesEndpoint: http://opentelemetry-collector.opentelemetry.svc.cluster.local:4318/v1/traces
+
+job:
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 900
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
