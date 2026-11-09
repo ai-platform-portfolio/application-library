@@ -51,3 +51,22 @@ Only HTTPS model endpoints are accepted. `MODEL_BASE_URL` and
 default uses the Foundry project and `https://ai.azure.com/.default`.
 This package does not supply diagnostic permissions, incident policies, a
 knowledge store, event ingestion or coding autonomy.
+
+## Read-only diagnostic broker
+
+`diagnostics-chart/` runs the same digest-pinned agent image as a short-lived
+AKS Job with a separate Foundry User identity. An agent declares tool names;
+the hosted handler returns one tool request per invocation. The broker executes
+only its fixed read-only registry, passes at most 24 KiB per result back as
+explicitly untrusted evidence, and stops at the manifest's request/tool limits.
+The Job receives one approved namespace and an image-bundled incident file.
+Its chart creates a RoleBinding only in that namespace and removes it when the
+release is uninstalled. The Kubernetes token stays in AKS. Tool results are
+not persisted by this Job.
+
+The current registry reads Deployment and Pod state, recent target events,
+bounded Pod logs and fixed Mimir CPU/restart queries. It cannot run shell
+commands or accept model-generated Kubernetes paths or PromQL. GitOps owns the
+broker's service account, read-only RBAC and federated Foundry identity. This
+is a read-only investigation path; alert intake, durable incident state,
+candidate promotion and fix PRs remain separate delivery stages.

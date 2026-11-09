@@ -8,6 +8,8 @@ from portfolio_agent_factory.manifest import load_agent
 from portfolio_agent_factory.publish import create_draft, create_first_release, version_request
 from portfolio_agent_factory.model import model_client
 from portfolio_agent_factory.release import smoke, wait_active
+from portfolio_agent_factory.broker import run_broker
+from portfolio_agent_factory.diagnostics import KubernetesDiagnostics, redact
 
 
 IMAGE = "registry.example.test/agents/catalog@sha256:" + "a" * 64
@@ -31,6 +33,66 @@ limits:
 
 
 class FactoryTests(unittest.TestCase):
+    def test_broker_executes_only_requested_read_only_tool_in_declared_namespace(self):
+        from unittest.mock import Mock
+
+        agent = SimpleNamespace(id="sre", tools=("workload_state",), max_requests=3, max_tool_calls=1)
+        incident = {"namespace": "staging", "workload": "web"}
+        executor = Mock()
+        executor.execute.return_value = {"ready": 1}
+        replies = iter([{"status": "tool_request", "tool": "workload_state"},
+                        {"status": "final", "answer": "Observed ready replica"}])
+        payloads = []
+
+        def invoke(endpoint, name, payload, credential):
+            payloads.append(payload)
+            return next(replies)
+
+        result = run_broker(agent, incident, "https://example.test/project", "staging",
+                            credential=object(), executor=executor, invoker=invoke)
+        self.assertEqual(result["tool_calls"], ["workload_state"])
+        self.assertEqual(payloads[1]["history"], [{"name": "workload_state", "result": {"ready": 1}}])
+        executor.execute.assert_called_once_with("workload_state", incident, "staging")
+
+        with self.assertRaisesRegex(ValueError, "approved namespace"):
+            run_broker(agent, incident, "https://example.test/project", "production",
+                       credential=object(), executor=executor, invoker=invoke)
+
+    def test_broker_rejects_unknown_tool_before_kubernetes_call(self):
+        from unittest.mock import Mock
+
+        agent = SimpleNamespace(id="sre", tools=("workload_state",), max_requests=2, max_tool_calls=1)
+        executor = Mock()
+        with self.assertRaisesRegex(ValueError, "unknown or repeated"):
+            run_broker(agent, {"namespace": "staging", "workload": "web"}, "https://example.test", "staging",
+                       credential=object(), executor=executor,
+                       invoker=lambda *_: {"status": "tool_request", "tool": "delete_pod"})
+        executor.execute.assert_not_called()
+
+    def test_diagnostic_adapter_uses_fixed_read_only_kubernetes_paths(self):
+        from unittest.mock import Mock
+
+        api = Mock()
+        deployment = {"metadata": {"generation": 2}, "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "web"}}},
+                      "status": {"observedGeneration": 2, "readyReplicas": 1}}
+        pods = {"items": [{"metadata": {"name": "web-1"}, "status": {"phase": "Running", "containerStatuses": [{"restartCount": 0}]}}]}
+        api.get.side_effect = [SimpleNamespace(json=lambda: deployment, raise_for_status=lambda: None),
+                               SimpleNamespace(json=lambda: pods, raise_for_status=lambda: None)]
+        result = KubernetesDiagnostics(api_client=api, metrics_client=Mock()).execute(
+            "workload_state", {"namespace": "staging", "workload": "web"}, "staging")
+        self.assertEqual(result["deployment"]["ready"], 1)
+        self.assertEqual(api.get.call_args_list[0].args[0], "/apis/apps/v1/namespaces/staging/deployments/web")
+        self.assertEqual(api.get.call_args_list[1].kwargs["params"]["labelSelector"], "app=web")
+        with self.assertRaisesRegex(ValueError, "read-only registry"):
+            KubernetesDiagnostics(api_client=api, metrics_client=Mock()).execute("delete_pod", {}, "staging")
+
+    def test_common_credentials_are_masked_before_log_evidence(self):
+        value = 'Authorization: Bearer abc.def password="secret" api_key=hidden'
+        redacted = redact(value)
+        for secret in ("abc.def", "secret", "hidden"):
+            self.assertNotIn(secret, redacted)
+        self.assertIn("[REDACTED]", redacted)
+
     def test_two_consumers_share_defaults_and_digest_policy(self):
         with tempfile.TemporaryDirectory() as directory:
             first = version_request(load_agent(agent_file(directory, "capacity")), IMAGE, REVISION)

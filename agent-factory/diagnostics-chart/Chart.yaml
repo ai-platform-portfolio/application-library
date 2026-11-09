@@ -1,0 +1,4 @@
+apiVersion: v2
+name: foundry-agent-diagnostics
+version: 0.1.0
+description: Short-lived read-only tool broker for Foundry hosted agents

@@ -12,12 +12,14 @@ from .publish import create_draft, version_request
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["validate", "publish", "release", "serve"])
+    parser.add_argument("command", choices=["validate", "publish", "release", "serve", "broker"])
     parser.add_argument("--agent", type=Path)
     parser.add_argument("--image")
     parser.add_argument("--revision")
     parser.add_argument("--project-endpoint", default=os.getenv("FOUNDRY_PROJECT_ENDPOINT"))
     parser.add_argument("--smoke", type=Path)
+    parser.add_argument("--incident", type=Path)
+    parser.add_argument("--namespace")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
@@ -25,6 +27,14 @@ def main():
         from .server import main as serve
 
         serve()
+        return
+
+    if args.command == "broker":
+        if not args.agent or not args.incident or not args.namespace or not args.project_endpoint:
+            parser.error("broker requires --agent, --incident, --namespace and --project-endpoint")
+        from .broker import main as investigate
+
+        investigate(args.agent, args.incident, args.project_endpoint, args.namespace)
         return
 
     if args.command == "validate":
