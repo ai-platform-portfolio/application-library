@@ -8,7 +8,7 @@ import httpx
 
 
 TOOL_DESCRIPTIONS = {
-    "workload_state": "Read the target Deployment and its Pods, including rollout and restart state.",
+    "workload_state": "Read the target Deployment and its Pods, including rollout, restart, image and HTTP readiness-probe state.",
     "recent_events": "Read recent Kubernetes events in the target namespace.",
     "bounded_logs": "Read at most 8 KiB of recent logs from one target Pod.",
     "service_metrics": "Read fixed CPU and restart metrics for the target namespace.",
@@ -71,6 +71,7 @@ class KubernetesDiagnostics:
                 raise ValueError("Deployment has no exact pod selector")
             label_selector = ",".join(f"{key}={value}" for key, value in sorted(selector.items()))
             pods = self._get(f"{prefix}/pods", {"labelSelector": label_selector, "limit": 20})
+            containers = deployment.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
             return {
                 "deployment": {
                     "name": workload,
@@ -80,6 +81,18 @@ class KubernetesDiagnostics:
                     "ready": deployment.get("status", {}).get("readyReplicas", 0),
                     "conditions": deployment.get("status", {}).get("conditions", [])[:8],
                     "selector": selector,
+                    "containers": [
+                        {
+                            "name": container.get("name"),
+                            "image": container.get("image"),
+                            "readiness_http_get": {
+                                key: container.get("readinessProbe", {}).get("httpGet", {}).get(key)
+                                for key in ("path", "port", "scheme")
+                                if key in container.get("readinessProbe", {}).get("httpGet", {})
+                            },
+                        }
+                        for container in containers[:8]
+                    ],
                 },
                 "pods": [
                     {

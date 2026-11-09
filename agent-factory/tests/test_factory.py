@@ -88,7 +88,10 @@ class FactoryTests(unittest.TestCase):
         from unittest.mock import Mock
 
         api = Mock()
-        deployment = {"metadata": {"generation": 2}, "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "web"}}},
+        deployment = {"metadata": {"generation": 2}, "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "web"}},
+                      "template": {"spec": {"containers": [{"name": "web", "image": IMAGE,
+                          "readinessProbe": {"httpGet": {"path": "/api/missing-readyz", "port": 8000}},
+                          "env": [{"name": "PASSWORD", "value": "secret"}]}]}}},
                       "status": {"observedGeneration": 2, "readyReplicas": 1}}
         pods = {"items": [{"metadata": {"name": "web-1"}, "status": {"phase": "Running", "containerStatuses": [{"restartCount": 0}]}}]}
         api.get.side_effect = [SimpleNamespace(json=lambda: deployment, raise_for_status=lambda: None),
@@ -96,6 +99,8 @@ class FactoryTests(unittest.TestCase):
         result = KubernetesDiagnostics(api_client=api, metrics_client=Mock()).execute(
             "workload_state", {"namespace": "staging", "workload": "web"}, "staging")
         self.assertEqual(result["deployment"]["ready"], 1)
+        self.assertEqual(result["deployment"]["containers"][0]["readiness_http_get"]["path"], "/api/missing-readyz")
+        self.assertNotIn("secret", str(result))
         self.assertEqual(api.get.call_args_list[0].args[0], "/apis/apps/v1/namespaces/staging/deployments/web")
         self.assertEqual(api.get.call_args_list[1].kwargs["params"]["labelSelector"], "app=web")
         with self.assertRaisesRegex(ValueError, "read-only registry"):
