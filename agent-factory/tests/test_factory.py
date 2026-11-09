@@ -5,8 +5,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from portfolio_agent_factory.manifest import load_agent
-from portfolio_agent_factory.publish import create_draft, version_request
+from portfolio_agent_factory.publish import create_draft, create_first_release, version_request
 from portfolio_agent_factory.model import model_client
+from portfolio_agent_factory.release import smoke, wait_active
 
 
 IMAGE = "registry.example.test/agents/catalog@sha256:" + "a" * 64
@@ -62,6 +63,46 @@ class FactoryTests(unittest.TestCase):
         call = client_class.return_value.agents.create_version.call_args
         self.assertEqual(call.kwargs["definition"].as_dict(), request["definition"])
         self.assertTrue(call.kwargs["draft"])
+
+    @patch("azure.ai.projects.AIProjectClient")
+    def test_first_release_reuses_same_revision_and_refuses_other_release(self, client_class):
+        with tempfile.TemporaryDirectory() as directory:
+            request = version_request(load_agent(agent_file(directory, "capacity")), IMAGE, REVISION, draft=False)
+        existing = SimpleNamespace(metadata=request["metadata"], version="1")
+        client_class.return_value.agents.list_versions.return_value = [existing]
+        result = create_first_release("https://foundry.example.services.ai.azure.com/api/projects/management", request, credential=object())
+        self.assertIs(result, existing)
+        client_class.return_value.agents.create_version.assert_not_called()
+
+        existing.metadata = {"source_revision": "c" * 40, "image_digest": IMAGE}
+        with self.assertRaisesRegex(ValueError, "promotion workflow"):
+            create_first_release("https://foundry.example.services.ai.azure.com/api/projects/management", request, credential=object())
+
+    @patch("azure.ai.projects.AIProjectClient")
+    def test_new_first_release_uses_official_definition(self, client_class):
+        with tempfile.TemporaryDirectory() as directory:
+            request = version_request(load_agent(agent_file(directory, "capacity")), IMAGE, REVISION, draft=False)
+        client_class.return_value.agents.list_versions.return_value = []
+        create_first_release("https://foundry.example.services.ai.azure.com/api/projects/management", request, credential=object())
+        call = client_class.return_value.agents.create_version.call_args
+        self.assertEqual(call.kwargs["definition"].as_dict(), request["definition"])
+        self.assertFalse(call.kwargs["draft"])
+
+    def test_active_status_and_structured_invocation(self):
+        from unittest.mock import Mock
+
+        active = SimpleNamespace(status="active", version="1", error=None)
+        project = Mock()
+        project.agents.get_version.return_value = active
+        self.assertIs(wait_active(project, "capacity", "1", timeout_seconds=1), active)
+
+        sender = Mock()
+        sender.post.return_value.json.return_value = {"answer": "Need evidence"}
+        credential = Mock()
+        credential.get_token.return_value.token = "token"
+        result = smoke("https://foundry.example.services.ai.azure.com/api/projects/management", "capacity", {"incident": {"title": "test"}}, credential, client=sender)
+        self.assertEqual(result["answer"], "Need evidence")
+        sender.post.return_value.raise_for_status.assert_called_once()
 
     @patch("portfolio_agent_factory.model.OpenAI")
     @patch("portfolio_agent_factory.model.get_bearer_token_provider")

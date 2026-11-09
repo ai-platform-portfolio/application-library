@@ -1,8 +1,9 @@
-"""Validate definitions, prepare a draft version, or serve a hosted agent."""
+"""Validate, publish, release, or serve a hosted agent."""
 
 import argparse
 import importlib
 import json
+import os
 from pathlib import Path
 
 from .manifest import load_agent
@@ -11,11 +12,12 @@ from .publish import create_draft, version_request
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["validate", "publish", "serve"])
+    parser.add_argument("command", choices=["validate", "publish", "release", "serve"])
     parser.add_argument("--agent", type=Path)
     parser.add_argument("--image")
     parser.add_argument("--revision")
-    parser.add_argument("--project-endpoint")
+    parser.add_argument("--project-endpoint", default=os.getenv("FOUNDRY_PROJECT_ENDPOINT"))
+    parser.add_argument("--smoke", type=Path)
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
@@ -38,13 +40,21 @@ def main():
         return
 
     if args.agent is None or not args.image or not args.revision:
-        parser.error("publish requires --agent, --image and --revision")
-    request = version_request(load_agent(args.agent), args.image, args.revision)
+        parser.error("publish/release require --agent, --image and --revision")
+    request = version_request(load_agent(args.agent), args.image, args.revision, draft=args.command == "publish")
     if args.apply:
         if not args.project_endpoint:
             parser.error("--apply requires --project-endpoint")
-        version = create_draft(args.project_endpoint, request)
-        print(json.dumps({"name": version.name, "version": version.version, "status": version.status}, default=str))
+        if args.command == "release":
+            if not args.smoke:
+                parser.error("release --apply requires --smoke")
+            from .release import release_and_smoke
+
+            result = release_and_smoke(args.project_endpoint, request, json.loads(args.smoke.read_text()))
+            print(json.dumps(result, default=str))
+        else:
+            version = create_draft(args.project_endpoint, request)
+            print(json.dumps({"name": version.name, "version": version.version, "status": version.status}, default=str))
     else:
         print(json.dumps(request, indent=2))
 

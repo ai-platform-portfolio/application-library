@@ -1,0 +1,5 @@
+apiVersion: v2
+name: foundry-agent-publisher
+description: Private, workload-identity publisher for an immutable Foundry agent image
+type: application
+version: 0.1.0
