@@ -1,19 +1,25 @@
+import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import yaml
+
 from portfolio_agent_factory.manifest import load_agent
 from portfolio_agent_factory.publish import create_candidate_release, create_draft, create_first_release, version_request
 from portfolio_agent_factory.model import model_client
 from portfolio_agent_factory.release import candidate_and_smoke, require_pinned_route, smoke, wait_active
-from portfolio_agent_factory.broker import run_broker
+from portfolio_agent_factory.broker import load_incident, run_broker
 from portfolio_agent_factory.diagnostics import KubernetesDiagnostics, redact
 
 
 IMAGE = "registry.example.test/agents/catalog@sha256:" + "a" * 64
 REVISION = "b" * 40
+CHART = Path(__file__).resolve().parents[1] / "diagnostics-chart"
 
 
 def agent_file(directory, name):
@@ -33,6 +39,18 @@ limits:
 
 
 class FactoryTests(unittest.TestCase):
+    def test_broker_rejects_oversized_or_non_object_incident_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "incident.json"
+            path.write_text(json.dumps({"namespace": "preview", "workload": "web"}))
+            self.assertEqual(load_incident(path)["workload"], "web")
+            path.write_text("x" * 8193)
+            with self.assertRaisesRegex(ValueError, "8 KiB limit"):
+                load_incident(path)
+            path.write_text("[]")
+            with self.assertRaisesRegex(ValueError, "must be an object"):
+                load_incident(path)
+
     def test_broker_executes_only_requested_read_only_tool_in_declared_namespace(self):
         from unittest.mock import Mock
 
@@ -278,6 +296,71 @@ class FactoryTests(unittest.TestCase):
         with patch.dict("os.environ", {"MODEL_BASE_URL": "http://gateway.example.test/openai/v1/"}):
             with self.assertRaisesRegex(ValueError, "HTTPS"):
                 model_client("https://foundry.example.test/api/projects/management")
+
+
+class DiagnosticChartTests(unittest.TestCase):
+    def render(self, incident, release="case", agent_id="sre"):
+        values = {"agent": {"id": agent_id, "image": IMAGE, "revision": REVISION, "version": "1"},
+                  "incident": incident}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "values.json"
+            path.write_text(json.dumps(values))
+            return subprocess.run(["helm", "template", release, str(CHART), "-f", str(path)],
+                                  text=True, capture_output=True,
+                                  env={**os.environ, "HELM_PLUGINS": directory})
+
+    def test_runtime_incident_is_content_addressed_and_namespace_scoped(self):
+        incident = {"namespace": "preview-example-pr-12", "payload": {
+            "namespace": "preview-example-pr-12", "workload": "web",
+            "summary": "Check current workload health."}}
+        rendered = self.render(incident)
+        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+        docs = {doc["kind"]: doc for doc in yaml.safe_load_all(rendered.stdout)}
+        self.assertEqual(set(docs), {"ConfigMap", "RoleBinding", "Job"})
+        self.assertEqual(json.loads(docs["ConfigMap"]["data"]["incident.json"]), incident["payload"])
+        self.assertEqual(docs["RoleBinding"]["metadata"]["namespace"], incident["namespace"])
+        job = docs["Job"]
+        self.assertIn("/var/run/agent-incident/incident.json", job["spec"]["template"]["spec"]["containers"][0]["args"])
+        self.assertEqual(job["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"],
+                         docs["ConfigMap"]["metadata"]["name"])
+        self.assertEqual(job["metadata"]["name"], next(doc["metadata"]["name"] for doc in yaml.safe_load_all(self.render(incident).stdout) if doc["kind"] == "Job"))
+
+        changed = {**incident, "payload": {**incident["payload"], "summary": "A new observation."}}
+        changed_docs = {doc["kind"]: doc for doc in yaml.safe_load_all(self.render(changed).stdout)}
+        self.assertNotEqual(job["metadata"]["name"], changed_docs["Job"]["metadata"]["name"])
+        self.assertNotEqual(docs["ConfigMap"]["metadata"]["name"], changed_docs["ConfigMap"]["metadata"]["name"])
+        other_release = {doc["kind"]: doc for doc in yaml.safe_load_all(self.render(incident, "another-case").stdout)}
+        self.assertNotEqual(job["metadata"]["name"], other_release["Job"]["metadata"]["name"])
+        long_id = "agent-" + "x" * 43
+        long_job = next(doc for doc in yaml.safe_load_all(self.render(incident, agent_id=long_id).stdout)
+                        if doc["kind"] == "Job")
+        self.assertLessEqual(len(long_job["metadata"]["name"]), 63)
+        self.assertEqual(len(long_job["metadata"]["name"].split("-")[-1]), 12)
+
+    def test_legacy_incident_and_invalid_runtime_inputs(self):
+        legacy = self.render({"namespace": "preview-example-pr-12", "path": "incidents/recorded.json"})
+        self.assertEqual(legacy.returncode, 0, legacy.stderr)
+        docs = {doc["kind"]: doc for doc in yaml.safe_load_all(legacy.stdout)}
+        self.assertEqual(set(docs), {"RoleBinding", "Job"})
+        self.assertIn("incidents/recorded.json", docs["Job"]["spec"]["template"]["spec"]["containers"][0]["args"])
+        other = {doc["kind"]: doc for doc in yaml.safe_load_all(
+            self.render({"namespace": "preview-example-pr-12", "path": "incidents/recorded.json"}, "other-case").stdout)}
+        self.assertNotEqual(docs["Job"]["metadata"]["name"], other["Job"]["metadata"]["name"])
+
+        base = {"namespace": "preview-example-pr-12", "payload": {
+            "namespace": "preview-example-pr-12", "workload": "web", "summary": "Check health."}}
+        invalid = [
+            ({**base, "path": "incidents/recorded.json"}, "mutually exclusive"),
+            ({**base, "payload": {**base["payload"], "namespace": "another"}}, "must match"),
+            ({**base, "payload": {"namespace": base["namespace"], "summary": "Check health."}}, "workload is required"),
+            ({**base, "payload": {**base["payload"], "summary": "x" * 2049}}, "2048 bytes"),
+            ({**base, "payload": {**base["payload"], "note": "x" * 8192}}, "8192 bytes"),
+        ]
+        for incident, message in invalid:
+            with self.subTest(message=message):
+                result = self.render(incident)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
 
 
 if __name__ == "__main__":
