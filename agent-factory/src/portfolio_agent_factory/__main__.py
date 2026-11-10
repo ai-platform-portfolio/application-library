@@ -12,7 +12,7 @@ from .publish import create_draft, version_request
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["validate", "validate-evals", "publish", "release", "candidate", "serve", "broker"])
+    parser.add_argument("command", choices=["validate", "validate-evals", "publish", "release", "candidate", "promote", "rollback", "serve", "broker"])
     parser.add_argument("--agent", type=Path)
     parser.add_argument("--image")
     parser.add_argument("--revision")
@@ -23,6 +23,8 @@ def main():
     parser.add_argument("--namespace")
     parser.add_argument("--version")
     parser.add_argument("--base-version")
+    parser.add_argument("--target-version")
+    parser.add_argument("--evidence", type=Path)
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
@@ -61,6 +63,29 @@ def main():
         for path in cases:
             case = load_case(path)
             print(f"Valid evaluation case: {case.id} v{case.version}")
+        return
+
+    if args.command in {"promote", "rollback"}:
+        if not all((args.agent, args.image, args.revision, args.base_version, args.target_version, args.evidence)):
+            parser.error("promote/rollback require --agent, --image, --revision, --base-version, --target-version and --evidence")
+        from .release import change_route, validate_route_evidence
+
+        request = version_request(load_agent(args.agent), args.image, args.revision, draft=False)
+        with args.evidence.open("rb") as source:
+            document = source.read(8193)
+        if len(document) > 8192:
+            raise ValueError("Route evidence exceeds the 8 KiB limit")
+        evidence = json.loads(document)
+        validate_route_evidence(evidence, request, args.base_version, args.target_version, args.command)
+        if args.apply:
+            if not args.project_endpoint:
+                parser.error("--apply requires --project-endpoint")
+            result = change_route(args.project_endpoint, request, args.base_version,
+                                  args.target_version, evidence, args.command)
+        else:
+            result = {"agent": request["agent_name"], "from_version": args.base_version,
+                      "to_version": args.target_version, "mode": args.command, "status": "validated_only"}
+        print(json.dumps(result))
         return
 
     if args.agent is None or not args.image or not args.revision:

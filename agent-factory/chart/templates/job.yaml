@@ -3,20 +3,34 @@
 {{- $revision := required "agent.revision is required" $agent.revision -}}
 {{- $id := required "agent.id is required" $agent.id -}}
 {{- $mode := .Values.release.mode | default "first" -}}
-{{- if not (has $mode (list "first" "candidate")) -}}{{- fail "release.mode must be first or candidate" -}}{{- end -}}
+{{- if not (has $mode (list "first" "candidate" "promote" "rollback")) -}}{{- fail "release.mode must be first, candidate, promote or rollback" -}}{{- end -}}
+{{- $route := has $mode (list "promote" "rollback") -}}
 {{- $base := .Values.release.baseVersion | toString -}}
-{{- if and (eq $mode "candidate") (not (regexMatch "^[0-9]+$" $base)) -}}{{- fail "release.baseVersion must be a concrete release number" -}}{{- end -}}
+{{- $target := .Values.release.targetVersion | toString -}}
+{{- if and (or (eq $mode "candidate") $route) (not (regexMatch "^[0-9]+$" $base)) -}}{{- fail "release.baseVersion must be a concrete release number" -}}{{- end -}}
+{{- if and $route (not (regexMatch "^[0-9]+$" $target)) -}}{{- fail "release.targetVersion must be a concrete release number" -}}{{- end -}}
 {{- if not (regexMatch "^[a-z][a-z0-9-]{1,48}$" $id) -}}{{- fail "agent.id must be a lower-case DNS label" -}}{{- end -}}
 {{- if not (regexMatch "^[a-f0-9]{40}$" $revision) -}}{{- fail "agent.revision must be a full Git commit SHA" -}}{{- end -}}
 {{- if not (regexMatch "^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$" $image) -}}{{- fail "agent.image must be registry-qualified and digest-pinned" -}}{{- end -}}
+{{- $runnerImage := $image -}}
+{{- if $route -}}
+  {{- $runnerImage = required "publisher.image is required for route changes" .Values.publisher.image -}}
+  {{- if not (regexMatch "^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$" $runnerImage) -}}{{- fail "publisher.image must be registry-qualified and digest-pinned" -}}{{- end -}}
+  {{- if not (kindIs "map" .Values.release.evidence) -}}{{- fail "release.evidence must be an object" -}}{{- end -}}
+  {{- if empty .Values.release.evidence -}}{{- fail "release.evidence is required for route changes" -}}{{- end -}}
+  {{- if gt (len (toJson .Values.release.evidence)) 8192 -}}{{- fail "release.evidence must be at most 8192 bytes" -}}{{- end -}}
+{{- end -}}
 {{- $run := sha256sum (printf "%s/%s/%s" $id $image $revision) | trunc 10 -}}
 {{- if eq $mode "candidate" -}}
 {{- $run = sha256sum (printf "%s/%s/%s/candidate/%s" $id $image $revision $base) | trunc 10 -}}
 {{- end -}}
+{{- if $route -}}
+{{- $run = sha256sum (printf "%s/%s/%s/%s/%s/%s/%s/%s" .Release.Name $id $mode $base $target $image $revision (toJson .Values.release.evidence)) | trunc 12 -}}
+{{- end -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ printf "publish-%s-%s" $id $run | trunc 63 | trimSuffix "-" }}
+  name: {{ if $route }}{{ printf "publish-%s-%s" ($id | trunc 42 | trimSuffix "-") $run }}{{ else }}{{ printf "publish-%s-%s" $id $run | trunc 63 | trimSuffix "-" }}{{ end }}
   labels:
     app.kubernetes.io/name: foundry-agent-publisher
     app.kubernetes.io/part-of: agent-factory
@@ -43,22 +57,31 @@ spec:
 
       containers:
         - name: publish
-          image: {{ $image | quote }}
+          image: {{ $runnerImage | quote }}
           imagePullPolicy: IfNotPresent
           command: [python, -m, portfolio_agent_factory]
           args:
-            - {{ ternary "candidate" "release" (eq $mode "candidate") }}
+            - {{ if $route }}{{ $mode }}{{ else }}{{ ternary "candidate" "release" (eq $mode "candidate") }}{{ end }}
             - --agent
             - {{ printf "agents/%s.yaml" $id | quote }}
             - --image
             - {{ $image | quote }}
             - --revision
             - {{ $revision | quote }}
+            {{- if $route }}
+            - --base-version
+            - {{ $base | quote }}
+            - --target-version
+            - {{ $target | quote }}
+            - --evidence
+            - /var/run/route-evidence/evidence.json
+            {{- else }}
             - --smoke
             - {{ printf "smoke/%s.json" $id | quote }}
             {{- if eq $mode "candidate" }}
             - --base-version
             - {{ $base | quote }}
+            {{- end }}
             {{- end }}
             - --apply
           env:
@@ -83,11 +106,23 @@ spec:
             capabilities:
               drop: [ALL]
           volumeMounts:
+            {{- if $route }}
+            - name: route-evidence
+              mountPath: /var/run/route-evidence
+              readOnly: true
+            {{- end }}
             - name: azure-identity-token
               mountPath: /var/run/secrets/azure/tokens
               readOnly: true
 
       volumes:
+        {{- if $route }}
+        - name: route-evidence
+          configMap:
+            name: {{ include "publisher.evidenceName" . }}
+            items:
+              - {key: evidence.json, path: evidence.json}
+        {{- end }}
         - name: azure-identity-token
           projected:
             sources:

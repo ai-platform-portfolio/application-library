@@ -1,6 +1,7 @@
 """Verify a first hosted release and record a private-network smoke invocation."""
 
 import os
+import re
 import time
 
 import httpx
@@ -12,6 +13,9 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from .publish import create_candidate_release, create_first_release
+
+
+_VERSION = re.compile(r"^[0-9]+$")
 
 
 def wait_active(client, agent_name: str, version: str, *, timeout_seconds: int = 600, interval_seconds: int = 5):
@@ -62,6 +66,92 @@ def require_pinned_route(project_endpoint: str, agent_name: str, expected_versio
         raise ValueError("Production endpoint is not fixed to the expected base version")
     if "invocations" not in endpoint.get("protocol_configuration", {}):
         raise ValueError("Production endpoint has no Invocations protocol")
+
+
+def validate_route_evidence(evidence: dict, request: dict, base_version: str, target_version: str, mode: str):
+    if not _VERSION.fullmatch(base_version) or not _VERSION.fullmatch(target_version):
+        raise ValueError("Base and target must be concrete release numbers")
+    if not isinstance(evidence, dict) or any(evidence.get(key) != value for key, value in {
+        "agent": request["agent_name"],
+        "base_version": base_version,
+        "target_version": target_version,
+        "image_digest": request["metadata"]["image_digest"],
+        "source_revision": request["metadata"]["source_revision"],
+    }.items()):
+        raise ValueError("Evidence must match the exact agent, route and target image/revision")
+    review = evidence.get("review")
+    if (not isinstance(review, dict) or review.get("status") != "approved" or
+            not isinstance(review.get("url"), str) or not review["url"].startswith("https://")):
+        raise ValueError("A reviewed HTTPS approval reference is required")
+    if mode == "promote":
+        evaluation = evidence.get("evaluation")
+        checks = evaluation.get("automated_checks") if isinstance(evaluation, dict) else None
+        required = {"declared_tools_only", "within_tool_limit", "within_request_limit",
+                    "required_tools_used", "forbidden_tools_avoided", "forbidden_answer_patterns_absent"}
+        if (not isinstance(checks, dict) or not required <= set(checks) or
+                any(value is not True for value in checks.values()) or
+                evaluation.get("status") != "human_review_required"):
+            raise ValueError("Promotion requires a passing factory evaluation and separate human approval")
+    elif mode == "rollback":
+        if not isinstance(evidence.get("reason"), str) or not evidence["reason"].strip():
+            raise ValueError("Rollback requires a reviewed reason")
+    else:
+        raise ValueError("Route mode must be promote or rollback")
+
+
+def change_route(project_endpoint: str, request: dict, base_version: str, target_version: str,
+                 evidence: dict, mode: str, credential=None, *, client=None, project=None) -> dict:
+    """Move one fixed route after exact-version, metadata and review checks."""
+    if not project_endpoint.startswith("https://") or "/api/projects/" not in project_endpoint:
+        raise ValueError("A Foundry project HTTPS endpoint is required")
+    if not _VERSION.fullmatch(base_version) or not _VERSION.fullmatch(target_version):
+        raise ValueError("Base and target must be concrete release numbers")
+    if request.get("draft"):
+        raise ValueError("A route target must be a regular release")
+    validate_route_evidence(evidence, request, base_version, target_version, mode)
+    credential = credential or DefaultAzureCredential()
+    project = project or AIProjectClient(project_endpoint, credential)
+    target = project.agents.get_version(agent_name=request["agent_name"], agent_version=target_version)
+    if str(getattr(target.status, "value", target.status)).lower() != "active":
+        raise ValueError("Target version is not Active")
+    if (target.metadata or {}).get("image_digest") != request["metadata"]["image_digest"] or \
+            (target.metadata or {}).get("source_revision") != request["metadata"]["source_revision"]:
+        raise ValueError("Target version metadata differs from the reviewed image/revision")
+
+    sender = client or httpx.Client(timeout=30)
+    url = f"{project_endpoint.rstrip('/')}/agents/{request['agent_name']}"
+    headers = {"Authorization": f"Bearer {credential.get_token('https://ai.azure.com/.default').token}"}
+    current = sender.get(url, params={"api-version": "v1"}, headers=headers)
+    current.raise_for_status()
+    endpoint = current.json().get("agent_endpoint", {})
+    if "invocations" not in endpoint.get("protocol_configuration", {}):
+        raise ValueError("Production endpoint has no Invocations protocol")
+    rules = endpoint.get("version_selector", {}).get("version_selection_rules", [])
+    def expected(version):
+        return [{"agent_version": version, "traffic_percentage": 100, "type": "FixedRatio"}]
+    if rules == expected(target_version):
+        return {"agent": request["agent_name"], "from_version": base_version,
+                "to_version": target_version, "mode": mode, "status": "already_target"}
+    if rules != expected(base_version):
+        raise ValueError("Production route differs from the expected base version")
+    if base_version == target_version:
+        raise ValueError("Base and target are identical but route is not already pinned")
+
+    patch_headers = {**headers, "Content-Type": "application/merge-patch+json"}
+    if current.headers.get("ETag"):
+        patch_headers["If-Match"] = current.headers["ETag"]
+    patch = {"agent_endpoint": {"version_selector": {"version_selection_rules": expected(target_version)}}}
+    updated = sender.patch(url, params={"api-version": "v1"}, headers=patch_headers, json=patch)
+    updated.raise_for_status()
+    observed = sender.get(url, params={"api-version": "v1"}, headers=headers)
+    observed.raise_for_status()
+    after = observed.json().get("agent_endpoint", {})
+    if (after.get("version_selector", {}).get("version_selection_rules") != expected(target_version) or
+            after.get("protocol_configuration") != endpoint.get("protocol_configuration") or
+            after.get("authorization_schemes") != endpoint.get("authorization_schemes")):
+        raise RuntimeError("Route readback or unrelated endpoint settings differ after PATCH")
+    return {"agent": request["agent_name"], "from_version": base_version,
+            "to_version": target_version, "mode": mode, "status": "verified"}
 
 
 def create_pinned_session(project_endpoint: str, agent_name: str, version: str, credential, *, timeout_seconds=120):

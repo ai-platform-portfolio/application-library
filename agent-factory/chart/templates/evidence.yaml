@@ -1,0 +1,11 @@
+{{- if has (.Values.release.mode | default "first") (list "promote" "rollback") }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "publisher.evidenceName" . }}
+  labels:
+    app.kubernetes.io/name: foundry-agent-publisher
+    app.kubernetes.io/part-of: agent-factory
+data:
+  evidence.json: {{ toJson .Values.release.evidence | quote }}
+{{- end }}
