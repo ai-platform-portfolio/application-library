@@ -6,8 +6,11 @@ agent:
 release:
   mode: first
   baseVersion: ""
+  targetVersion: ""
+  evidence: {}
 
 publisher:
+  image: ""
   serviceAccountName: foundry-publisher
   identityConfigMap: foundry-publisher-identity
   configMap: foundry-publisher

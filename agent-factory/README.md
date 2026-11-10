@@ -131,6 +131,67 @@ support can create a regular version instead.
 The diagnostic chart requires `agent.version` as a concrete numeric version.
 Its broker creates one version-pinned session and uses it for every bounded
 tool turn, so validation never falls through to the ordinary endpoint. Reuse
-the candidate version and immutable image digest for repeat runs. Promotion,
-rollback and deletion of old versions remain separate operations and require
-evaluation evidence and review.
+the candidate version and immutable image digest for repeat runs. Promotion
+and rollback use separate reviewed route-change Jobs; old-version deletion is
+not automated.
+
+## Reviewed route changes
+
+The publisher chart supports `release.mode: promote` and `rollback` after a
+candidate is Active. It verifies the current endpoint is fixed at the declared
+`baseVersion`, the target version is Active with the declared image digest and
+source revision, and an operator-supplied evidence document matches those
+inputs. Promotion requires all six standard factory automated checks to pass
+and a separate reviewed HTTPS approval reference. Rollback requires that
+reference and a reason. Evidence is metadata only; Helm stores it in its
+release Secret and the Job mounts a short-lived ConfigMap. Use one Helm release
+name per route-change identity, then uninstall it after verifying the Job.
+
+```yaml
+agent:
+  id: example
+  image: registry.example.test/agents/example@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  revision: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+release:
+  mode: promote
+  baseVersion: "1"
+  targetVersion: "2"
+  evidence:
+    agent: example
+    base_version: "1"
+    target_version: "2"
+    image_digest: registry.example.test/agents/example@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    source_revision: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    evaluation:
+      status: human_review_required
+      human_review: pending
+      automated_checks:
+        declared_tools_only: true
+        within_tool_limit: true
+        within_request_limit: true
+        required_tools_used: true
+        forbidden_tools_avoided: true
+        forbidden_answer_patterns_absent: true
+    review: {status: approved, url: https://github.com/example/agent/pull/2}
+
+publisher:
+  # The runner must contain this factory command and agents/example.yaml.
+  image: registry.example.test/agents/example@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+```
+
+The route Job sends a merge PATCH containing only `version_selector`, then
+reads the endpoint back and checks that the Invocations protocol and
+authorization settings were preserved. It uses `If-Match` when Foundry returns
+an ETag. A read-only GET of the current portfolio account returned no ETag,
+so Azure cannot provide an atomic compare-and-swap precondition there; the
+expected-route check and readback detect drift but cannot eliminate a race
+with another operator. Serialize changes through a reviewed release process.
+Reapplying the same intent after a verified route change is a no-op.
+The review URL and evaluation fields are operator attestations, not an
+independent verification of reviewer identity or candidate-specific diagnostic
+quality. The offline evaluator currently tests a model route and recorded
+fixtures; it does not prove a hosted candidate passed those cases. Live route
+changes require separate operator approval. The current rebuilt SRE endpoint
+still needs an explicitly reviewed first pin from `@latest` before the existing
+candidate and route-change paths can be used.

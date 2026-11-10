@@ -1,6 +1,6 @@
 [project]
 name = "portfolio-agent-factory"
-version = "0.3.0"
+version = "0.4.0"
 description = "Reusable Foundry hosted-agent definitions and lifecycle"
 requires-python = ">=3.12"
 dependencies = [
