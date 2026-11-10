@@ -1,0 +1,212 @@
+{{- $agent := .Values.agent -}}
+{{- $policy := .Values.policy -}}
+{{- $repo := required "policy.repository is required" $policy.repository -}}
+{{- $id := required "agent.id is required" $agent.id -}}
+{{- $image := required "agent.image is required" $agent.image -}}
+{{- $revision := required "agent.revision is required" $agent.revision -}}
+{{- $appId := required "github.appId is required" .Values.github.appId | toString -}}
+{{- $installId := required "github.installationId is required" .Values.github.installationId | toString -}}
+{{- if not (regexMatch "^[a-z][a-z0-9-]{0,15}$" $id) -}}{{- fail "agent.id must be a short DNS label" -}}{{- end -}}
+{{- if not (regexMatch "^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$" $repo) -}}{{- fail "policy.repository must be owner/repository" -}}{{- end -}}
+{{- if not (regexMatch "^[a-f0-9]{40}$" $policy.base_sha) -}}{{- fail "policy.base_sha must be a full Git commit SHA" -}}{{- end -}}
+{{- if not (regexMatch "^[a-f0-9]{40}$" $revision) -}}{{- fail "agent.revision must be a full Git commit SHA" -}}{{- end -}}
+{{- if not (regexMatch "^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$" $image) -}}{{- fail "agent.image must be digest-pinned" -}}{{- end -}}
+{{- if not (regexMatch "^[0-9]+$" $appId) -}}{{- fail "github.appId must be numeric" -}}{{- end -}}
+{{- if not (regexMatch "^[0-9]+$" $installId) -}}{{- fail "github.installationId must be numeric" -}}{{- end -}}
+{{- if not (kindIs "slice" $policy.editable_paths) -}}{{- fail "policy.editable_paths must be a list" -}}{{- end -}}
+{{- if not (kindIs "slice" $policy.checks) -}}{{- fail "policy.checks must be a list" -}}{{- end -}}
+{{- if not (required "diagnosis.answer is required" .Values.diagnosis.answer) -}}{{- fail "diagnosis.answer is required" -}}{{- end -}}
+{{- if ne .Release.Namespace "foundry-publisher" -}}{{- fail "install the fix worker in foundry-publisher" -}}{{- end -}}
+{{- $repositoryName := index (splitList "/" $repo) 1 -}}
+{{- $hash := sha256sum (printf "%s/%s/%s/%s" .Release.Name $repo $policy.base_sha (toJson .Values.diagnosis)) | trunc 12 -}}
+{{- $name := printf "fix-%s-%s" $id $hash -}}
+{{- $tokenNamespace := "argocd" -}}
+{{- range $mode := list "read" "write" }}
+{{- if or (eq $mode "read") $.Values.publish.enabled }}
+---
+# The existing App key remains in argocd. Only short-lived, repository-scoped
+# installation tokens are reflected to the worker namespace.
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: GithubAccessToken
+metadata:
+  name: {{ printf "%s-%s" $name $mode }}
+  namespace: {{ $tokenNamespace }}
+spec:
+  appID: {{ $appId | quote }}
+  installID: {{ $installId | quote }}
+  repositories: [{{ $repositoryName | quote }}]
+  permissions:
+    contents: {{ ternary "write" "read" (eq $mode "write") }}
+    {{- if eq $mode "write" }}
+    pull_requests: write
+    {{- end }}
+  auth:
+    privateKey:
+      secretRef: {name: {{ $.Values.github.keySecretName }}, key: {{ $.Values.github.keySecretKey }}}
+
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: {{ printf "%s-%s" $name $mode }}
+  namespace: {{ $tokenNamespace }}
+spec:
+  refreshInterval: 15m
+  target:
+    name: {{ printf "%s-%s" $name $mode }}
+    template:
+      mergePolicy: Merge
+      metadata:
+        annotations:
+          reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+          reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: '^foundry-publisher$'
+          reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+          reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: '^foundry-publisher$'
+  dataFrom:
+    - sourceRef:
+        generatorRef:
+          apiVersion: generators.external-secrets.io/v1alpha1
+          kind: GithubAccessToken
+          name: {{ printf "%s-%s" $name $mode }}
+{{- end }}
+{{- end }}
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-input
+data:
+  policy.json: {{ toJson $policy | quote }}
+  diagnosis.json: {{ toJson .Values.diagnosis | quote }}
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  labels:
+    app.kubernetes.io/name: foundry-agent-fix
+    app.kubernetes.io/part-of: agent-factory
+  annotations:
+    agent-factory/source-revision: {{ $revision | quote }}
+    agent-factory/image: {{ $image | quote }}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: {{ .Values.job.ttlSecondsAfterFinished }}
+  activeDeadlineSeconds: {{ .Values.job.activeDeadlineSeconds }}
+  template:
+    spec:
+      serviceAccountName: {{ .Values.job.serviceAccountName }}
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+
+      initContainers:
+        - name: fetch
+          image: {{ $image | quote }}
+          imagePullPolicy: IfNotPresent
+          command: [python, -m, portfolio_agent_factory]
+          args: [fix-fetch, --policy, /input/policy.json, --root, /workspace/repo]
+          env:
+            - name: GITHUB_READ_TOKEN
+              valueFrom:
+                secretKeyRef: {name: {{ $name }}-read, key: token}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: '1', memory: 512Mi}
+          securityContext: &restricted
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: workspace, mountPath: /workspace}
+            - {name: input, mountPath: /input, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+
+        - name: propose
+          image: {{ $image | quote }}
+          imagePullPolicy: IfNotPresent
+          command: [python, -m, portfolio_agent_factory]
+          args: [fix-propose, --policy, /input/policy.json, --root, /workspace/repo, --diagnosis, /input/diagnosis.json, --output, /workspace/proposal.json, --model, {{ .Values.model.deployment | quote }}]
+          env:
+            - name: AZURE_CLIENT_ID
+              valueFrom:
+                configMapKeyRef: {name: {{ .Values.model.identityConfigMap }}, key: clientId}
+            - name: AZURE_TENANT_ID
+              valueFrom:
+                configMapKeyRef: {name: {{ .Values.model.projectConfigMap }}, key: tenantId}
+            - name: FOUNDRY_PROJECT_ENDPOINT
+              valueFrom:
+                configMapKeyRef: {name: {{ .Values.model.projectConfigMap }}, key: projectEndpoint}
+            - {name: AZURE_FEDERATED_TOKEN_FILE, value: /var/run/secrets/azure/tokens/azure-identity-token}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: '1', memory: 1Gi}
+          securityContext: *restricted
+          volumeMounts:
+            - {name: workspace, mountPath: /workspace}
+            - {name: input, mountPath: /input, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+            - {name: azure-identity-token, mountPath: /var/run/secrets/azure/tokens, readOnly: true}
+
+        - name: validate
+          image: {{ $image | quote }}
+          imagePullPolicy: IfNotPresent
+          command: [python, -m, portfolio_agent_factory]
+          args: [fix-validate, --policy, /input/policy.json, --root, /workspace/repo, --proposal, /workspace/proposal.json, --output, /workspace/validation.json]
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: '1', memory: 1Gi}
+          securityContext: *restricted
+          volumeMounts:
+            - {name: workspace, mountPath: /workspace}
+            - {name: input, mountPath: /input, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+
+      containers:
+        - name: publish
+          image: {{ $image | quote }}
+          imagePullPolicy: IfNotPresent
+          command: [python, -m, portfolio_agent_factory]
+          args:
+            - fix-publish
+            - --policy
+            - /input/policy.json
+            - --root
+            - /workspace/repo
+            - --proposal
+            - /workspace/proposal.json
+            - --validation
+            - /workspace/validation.json
+            {{- if .Values.publish.enabled }}
+            - --apply
+            {{- end }}
+          env:
+            {{- if .Values.publish.enabled }}
+            - name: GITHUB_WRITE_TOKEN
+              valueFrom:
+                secretKeyRef: {name: {{ $name }}-write, key: token}
+            {{- end }}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: '1', memory: 512Mi}
+          securityContext: *restricted
+          volumeMounts:
+            - {name: workspace, mountPath: /workspace, readOnly: true}
+            - {name: input, mountPath: /input, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+
+      volumes:
+        - {name: workspace, emptyDir: {sizeLimit: 30Mi}}
+        - {name: input, configMap: {name: {{ $name }}-input}}
+        - {name: tmp, emptyDir: {sizeLimit: 50Mi}}
+        - name: azure-identity-token
+          projected:
+            sources:
+              - serviceAccountToken: {audience: api://AzureADTokenExchange, expirationSeconds: 3600, path: azure-identity-token}

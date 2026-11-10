@@ -12,7 +12,7 @@ from .publish import create_draft, version_request
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["validate", "validate-evals", "publish", "release", "candidate", "promote", "rollback", "serve", "broker"])
+    parser.add_argument("command", choices=["validate", "validate-evals", "publish", "release", "candidate", "promote", "rollback", "serve", "broker", "fix-fetch", "fix-propose", "fix-validate", "fix-publish"])
     parser.add_argument("--agent", type=Path)
     parser.add_argument("--image")
     parser.add_argument("--revision")
@@ -26,7 +26,53 @@ def main():
     parser.add_argument("--target-version")
     parser.add_argument("--evidence", type=Path)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--policy", type=Path)
+    parser.add_argument("--root", type=Path)
+    parser.add_argument("--diagnosis", type=Path)
+    parser.add_argument("--proposal", type=Path)
+    parser.add_argument("--validation", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--model")
     args = parser.parse_args()
+
+    if args.command.startswith("fix-"):
+        from .fix import fetch, load_policy, propose, publication_ready, publish, read_json, validate, write_json
+
+        if not args.policy or not args.root:
+            parser.error("fix commands require --policy and --root")
+        policy = load_policy(args.policy)
+        if args.command == "fix-fetch":
+            fetch(policy, args.root, os.environ["GITHUB_READ_TOKEN"])
+            print(json.dumps({"repository": policy["repository"], "base_sha": policy["base_sha"], "status": "fetched"}))
+        elif args.command == "fix-propose":
+            if not args.diagnosis or not args.output or not args.project_endpoint:
+                parser.error("fix-propose requires --diagnosis, --output and --project-endpoint")
+            from .model import model_client
+
+            candidate = propose(policy, args.root, read_json(args.diagnosis, 16384),
+                                model_client(args.project_endpoint), args.model or os.getenv("MODEL_DEPLOYMENT_NAME", "chat"))
+            write_json(args.output, candidate)
+            print(json.dumps({"incident_id": policy["incident_id"], "status": "proposed", "files": len(candidate["changes"])}))
+        elif args.command == "fix-validate":
+            if not args.proposal or not args.output:
+                parser.error("fix-validate requires --proposal and --output")
+            report = validate(policy, args.root, read_json(args.proposal))
+            write_json(args.output, report)
+            print(json.dumps({"incident_id": policy["incident_id"], "status": "validated", "passed": report["passed"]}))
+            if not report["passed"]:
+                raise SystemExit(1)
+        else:
+            if not args.proposal or not args.validation:
+                parser.error("fix-publish requires --proposal and --validation")
+            candidate = read_json(args.proposal)
+            report = read_json(args.validation)
+            publication_ready(policy, args.root, candidate, report)
+            if not args.apply:
+                print(json.dumps({"incident_id": policy["incident_id"], "status": "validated_only"}))
+            else:
+                result = publish(policy, args.root, candidate, report, os.environ["GITHUB_WRITE_TOKEN"])
+                print(json.dumps(result))
+        return
 
     if args.command == "serve":
         from .server import main as serve

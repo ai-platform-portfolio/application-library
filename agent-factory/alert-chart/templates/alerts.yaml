@@ -1,3 +1,4 @@
+{{- if not .Values.registration.enabled }}
 {{- $id := required "agent.id is required" .Values.agent.id -}}
 {{- $image := required "agent.image is required" .Values.agent.image -}}
 {{- $revision := required "agent.revision is required" .Values.agent.revision -}}
@@ -209,3 +210,4 @@ spec:
               operation: append
       retryStrategy: {steps: 2}
       rateLimit: {unit: Minute, requestsPerUnit: 2}
+{{- end }}

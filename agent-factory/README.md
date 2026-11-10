@@ -5,6 +5,17 @@ manifest contract, Invocations protocol host, OpenAI-compatible model route and
 digest-pinned draft-version publisher. An agent repository supplies its own
 `agents/<id>.yaml`, importable handler, evaluations and container image.
 
+## Reviewed fix PRs
+
+`fix-chart/` runs four short-lived phases against one exact GitHub base commit:
+fetch source with a repository-scoped read token, propose a bounded change with
+Foundry, validate it without cloud credentials, then publish a draft PR with a
+separate repository-scoped write token. Its operator-supplied policy fixes the
+repository, editable directories and checks; the model cannot expand them. The
+chart defaults to validation-only mode. See [fix-chart/README.md](fix-chart/README.md)
+for inputs, credential custody and acceptance limits. The SRE catalog supplies
+one consumer policy; another agent can use the same worker unchanged.
+
 The manifest needs `schema_version: 1`, `id`, `model`, `handler`, `eval_suite`,
 `instructions`, `reasoning_effort` and bounded `limits`. `kind: hosted` and
 `protocol: invocations` are the current defaults; other kinds and protocols
