@@ -64,8 +64,10 @@ def main():
                 parser.error("fix-propose requires --diagnosis, --output and --project-endpoint")
             from .model import model_client
 
+            # Give the proposal stage more time to recover from shared model throttling.
+            client = model_client(args.project_endpoint).with_options(max_retries=5)
             candidate = propose(policy, args.root, read_json(args.diagnosis, 16384),
-                                model_client(args.project_endpoint), args.model or os.getenv("MODEL_DEPLOYMENT_NAME", "chat"))
+                                client, args.model or os.getenv("MODEL_DEPLOYMENT_NAME", "chat"))
             write_json(args.output, candidate)
             print(json.dumps({"incident_id": policy["incident_id"], "status": "proposed", "files": len(candidate["changes"])}))
         elif args.command == "fix-validate":

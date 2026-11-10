@@ -15,13 +15,12 @@ reconciliation cannot register itself. Removing the Application prunes the
 alert resources. Repository/PR-derived target namespace and immutable image
 must come from the release inputs, not from a copied chart manifest.
 
-The EventSource watches only Events in the selected namespace. The Sensor
+The EventSource watches Event additions in the selected namespace. The Sensor
 accepts Warning/Unhealthy readiness-probe Events for Pods whose names start
-with the selected workload. The Event UID becomes the Job name suffix, so
-updates or redelivery of the same Event cannot create another Job while the
-first remains. Jobs expire after 24 hours; a later repeat can run again. The
-trigger is limited to two attempts per minute. Duplicate `AlreadyExists`
-trigger errors are expected and do not create a second investigation.
+with the selected workload. Repeated updates to an existing Event are ignored
+so they cannot consume the two trigger attempts per minute. Startup can replay
+existing Events. The Event UID becomes the Job name suffix, so a replay cannot
+create a second investigation while that Job exists. Jobs expire after 24 hours.
 
 Only the UID enters the Job metadata. Event text is never passed to the model
 as instructions. The broker reads current state with the existing narrow

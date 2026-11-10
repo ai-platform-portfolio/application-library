@@ -103,7 +103,7 @@ spec:
       group: ""
       version: v1
       resource: events
-      eventTypes: [ADD, UPDATE]
+      eventTypes: [ADD]
       filter:
         afterStart: false
     {{- if .Values.handoff.enabled }}
@@ -139,7 +139,7 @@ spec:
       eventName: readiness
       filters:
         data:
-          - {path: type, type: string, value: ['^(ADD|UPDATE)$']}
+          - {path: type, type: string, value: ['^ADD$']}
           - {path: body.type, type: string, value: ['^Warning$']}
           - {path: body.reason, type: string, value: ['^Unhealthy$']}
           - {path: body.message, type: string, value: ['^Readiness probe failed:']}
