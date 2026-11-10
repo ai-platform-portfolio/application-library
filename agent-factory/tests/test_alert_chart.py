@@ -1,6 +1,7 @@
 """Render the alert bridge that launches the existing read-only broker."""
 
 import subprocess
+import hashlib
 import unittest
 from pathlib import Path
 
@@ -30,11 +31,12 @@ class AlertChartTests(unittest.TestCase):
         docs = {(item["kind"], item["metadata"]["name"]): item
                 for item in yaml.safe_load_all(result.stdout) if item}
 
-        source = docs["EventSource", "agent-alert-sre"]["spec"]
+        name = "agent-alert-sre-" + hashlib.sha256(b"preview-test/web").hexdigest()[:8]
+        source = docs["EventSource", name]["spec"]
         self.assertEqual(source["resource"]["readiness"]["namespace"], "preview-test")
         self.assertEqual(source["resource"]["readiness"]["resource"], "events")
 
-        sensor = docs["Sensor", "agent-alert-sre"]["spec"]
+        sensor = docs["Sensor", name]["spec"]
         filters = sensor["dependencies"][0]["filters"]["data"]
         self.assertIn("body.message", {item["path"] for item in filters})
         trigger = sensor["triggers"][0]
@@ -45,7 +47,7 @@ class AlertChartTests(unittest.TestCase):
         self.assertEqual(job["spec"]["template"]["spec"]["serviceAccountName"], "foundry-diagnostic-broker")
         self.assertEqual(job["spec"]["template"]["spec"]["containers"][0]["image"], IMAGE)
         self.assertEqual(job["spec"]["ttlSecondsAfterFinished"], 86400)
-        incident = docs["ConfigMap", "agent-alert-sre-incident"]["data"]["incident.json"]
+        incident = docs["ConfigMap", name + "-incident"]["data"]["incident.json"]
         self.assertNotIn("{{", incident)
         self.assertIn('"workload":"web"', incident)
 

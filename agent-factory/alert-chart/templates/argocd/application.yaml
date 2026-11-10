@@ -5,7 +5,8 @@
 {{- $revision := required "registration.revision is required" .Values.registration.revision -}}
 {{- if not (regexMatch "^https://github.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\\.git$" $repository) -}}{{- fail "registration.repository must be a GitHub HTTPS Git URL" -}}{{- end -}}
 {{- if not (regexMatch "^[a-f0-9]{40}$" $revision) -}}{{- fail "registration.revision must be a full Git commit SHA" -}}{{- end -}}
-{{- $name := printf "agent-alert-%s-%s" $id (sha256sum $namespace | trunc 12) -}}
+{{- $workload := required "target.workload is required" .Values.target.workload -}}
+{{- $name := printf "agent-alert-%s-%s" $id (sha256sum (printf "%s/%s" $namespace $workload) | trunc 12) -}}
 {{- $child := deepCopy .Values -}}
 {{- $_ := set $child.registration "enabled" false -}}
 # An operator renders only this template for initial registration. The child

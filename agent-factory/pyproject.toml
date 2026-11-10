@@ -1,6 +1,6 @@
 [project]
 name = "portfolio-agent-factory"
-version = "0.4.0"
+version = "0.5.0"
 description = "Reusable Foundry hosted-agent definitions and lifecycle"
 requires-python = ">=3.12"
 dependencies = [
@@ -21,3 +21,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+portfolio_agent_factory = ["charts/fix/Chart.yaml", "charts/fix/values.yaml", "charts/fix/templates/*.yaml"]

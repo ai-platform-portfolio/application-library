@@ -16,6 +16,11 @@ chart defaults to validation-only mode. See [fix-chart/README.md](fix-chart/READ
 for inputs, credential custody and acceptance limits. The SRE catalog supplies
 one consumer policy; another agent can use the same worker unchanged.
 
+The optional [alert-chart handoff](alert-chart/README.md#optional-coding-handoff)
+connects a successful, structured read-only diagnosis to this same fix chart
+through Argo Events and a separate scoped dispatcher. It defaults off. Live
+event-to-draft acceptance remains an explicit deployment gate.
+
 The manifest needs `schema_version: 1`, `id`, `model`, `handler`, `eval_suite`,
 `instructions`, `reasoning_effort` and bounded `limits`. `kind: hosted` and
 `protocol: invocations` are the current defaults; other kinds and protocols

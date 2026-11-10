@@ -6,7 +6,7 @@
 {{- $target := required "target.namespace is required" .Values.target.namespace -}}
 {{- $workload := required "target.workload is required" .Values.target.workload -}}
 {{- $brokerNamespace := .Values.broker.namespace -}}
-{{- $name := printf "agent-alert-%s" $id -}}
+{{- $name := printf "agent-alert-%s-%s" $id (sha256sum (printf "%s/%s" $target $workload) | trunc 8) -}}
 {{- if not (regexMatch "^[a-z][a-z0-9-]{0,15}$" $id) -}}{{- fail "agent.id must be a DNS label of at most 16 characters" -}}{{- end -}}
 {{- range $field, $value := dict "target.namespace" $target "target.workload" $workload "broker.namespace" $brokerNamespace -}}
   {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $value) -}}{{- fail (printf "%s must be a DNS label" $field) -}}{{- end -}}
@@ -106,6 +106,18 @@ spec:
       eventTypes: [ADD, UPDATE]
       filter:
         afterStart: false
+    {{- if .Values.handoff.enabled }}
+    diagnostic:
+      namespace: {{ $brokerNamespace }}
+      group: ""
+      version: v1
+      resource: pods
+      eventTypes: [UPDATE]
+      filter:
+        afterStart: false
+        labels:
+          - {key: agent-factory-diagnostic, operation: "==", value: {{ $name }}}
+    {{- end }}
 
 ---
 apiVersion: argoproj.io/v1alpha1
@@ -157,6 +169,10 @@ spec:
                 activeDeadlineSeconds: 900
                 ttlSecondsAfterFinished: 86400
                 template:
+                  metadata:
+                    labels:
+                      agent-factory-diagnostic: {{ $name }}
+                      agent-factory-incident: {{ printf "diag-%s-" $id | quote }}
                   spec:
                     serviceAccountName: {{ .Values.broker.serviceAccountName }}
                     restartPolicy: Never
@@ -170,7 +186,7 @@ spec:
                         image: {{ $image | quote }}
                         imagePullPolicy: IfNotPresent
                         command: [python, -m, portfolio_agent_factory]
-                        args: [broker, --agent, {{ printf "agents/%s.yaml" $id | quote }}, --version, {{ $version | quote }}, --incident, /var/run/agent-incident/incident.json, --namespace, {{ $target | quote }}]
+                        args: [broker, --agent, {{ printf "agents/%s.yaml" $id | quote }}, --version, {{ $version | quote }}, --incident, /var/run/agent-incident/incident.json, --namespace, {{ $target | quote }}{{- if .Values.handoff.enabled }}, --handoff{{- end }}]
                         env:
                           - name: AZURE_CLIENT_ID
                             valueFrom:
@@ -184,6 +200,10 @@ spec:
                           - {name: AZURE_FEDERATED_TOKEN_FILE, value: /var/run/secrets/azure/tokens/azure-identity-token}
                           - {name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, value: {{ .Values.broker.otlpTracesEndpoint | quote }}}
                           - {name: MIMIR_QUERY_URL, value: {{ .Values.broker.mimirQueryUrl | quote }}}
+                          {{- if .Values.handoff.enabled }}
+                          - {name: HANDOFF_REQUIRED_EVIDENCE, value: {{ toJson .Values.handoff.requiredEvidence | quote }}}
+                          - {name: HANDOFF_REQUIRE_DEGRADED, value: {{ .Values.handoff.requireDegradedWorkload | toString | quote }}}
+                          {{- end }}
                         resources:
                           requests: {cpu: 100m, memory: 256Mi}
                           limits: {cpu: '1', memory: 1Gi}
@@ -207,6 +227,9 @@ spec:
             # retention window makes duplicate deliveries an AlreadyExists no-op.
             - src: {dependencyName: readiness, dataKey: body.metadata.uid}
               dest: metadata.name
+              operation: append
+            - src: {dependencyName: readiness, dataKey: body.metadata.uid}
+              dest: spec.template.metadata.labels.agent-factory-incident
               operation: append
       retryStrategy: {steps: 2}
       rateLimit: {unit: Minute, requestsPerUnit: 2}
