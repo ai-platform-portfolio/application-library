@@ -99,6 +99,24 @@ broker's service account, read-only RBAC and federated Foundry identity. This
 is a read-only investigation path; alert intake, durable incident state,
 candidate promotion and fix PRs remain separate delivery stages.
 
+## Offline evaluation
+
+`portfolio_agent_factory.evaluation` loads versioned case files and replays
+recorded tool fixtures through a bounded model loop. The model receives only
+the incident and requested fixtures; provenance, reference and rubric stay
+with the grader. The reusable report records tool and request counts plus
+deterministic checks. Passing these checks yields `human_review_required`,
+never an automatic diagnosis pass: a reviewer must score the case's semantic
+criteria and hard failures. A failed check yields `failed`.
+
+Agent repositories own their cases and may add `rubric.automated` with
+`required_tools`, `forbidden_tools` and `forbidden_answer_patterns`. These
+literal regex checks catch specific observable mistakes, not all unsafe claims.
+Each fixture is limited to 24 KiB, and the agent manifest sets the request and
+tool-call limits. A CI caller can load a case, run it against a chosen model
+client and store the resulting JSON report; live model calls are deliberately
+separate from offline deterministic unit tests.
+
 ## Candidate validation
 
 After an operator fixes the ordinary Invocations endpoint to the current

@@ -12,13 +12,14 @@ from .publish import create_draft, version_request
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["validate", "publish", "release", "candidate", "serve", "broker"])
+    parser.add_argument("command", choices=["validate", "validate-evals", "publish", "release", "candidate", "serve", "broker"])
     parser.add_argument("--agent", type=Path)
     parser.add_argument("--image")
     parser.add_argument("--revision")
     parser.add_argument("--project-endpoint", default=os.getenv("FOUNDRY_PROJECT_ENDPOINT"))
     parser.add_argument("--smoke", type=Path)
     parser.add_argument("--incident", type=Path)
+    parser.add_argument("--case", type=Path)
     parser.add_argument("--namespace")
     parser.add_argument("--version")
     parser.add_argument("--base-version")
@@ -49,6 +50,17 @@ def main():
             if not callable(getattr(importlib.import_module(module), function)):
                 raise ValueError(f"Handler is not callable: {agent.handler}")
             print(f"Valid hosted agent: {agent.id}")
+        return
+
+    if args.command == "validate-evals":
+        from .evaluation import load_case
+
+        cases = [args.case] if args.case else sorted(Path("evals/cases").glob("*.yaml"))
+        if not cases:
+            parser.error("No evaluation cases found")
+        for path in cases:
+            case = load_case(path)
+            print(f"Valid evaluation case: {case.id} v{case.version}")
         return
 
     if args.agent is None or not args.image or not args.revision:
