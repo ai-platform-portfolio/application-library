@@ -64,7 +64,7 @@ Its chart creates a RoleBinding only in that namespace and removes it when the
 release is uninstalled. The Kubernetes token stays in AKS. Tool results are
 not persisted by this Job.
 
-The current registry reads Deployment and Pod state, including bounded container
+The current registry reads Deployment or Argo Rollout and Pod state, including bounded container
 image and HTTP readiness-probe fields while excluding environment values;
 recent target events,
 bounded Pod logs and fixed Mimir CPU/restart queries. It cannot run shell

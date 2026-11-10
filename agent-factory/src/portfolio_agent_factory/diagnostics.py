@@ -8,7 +8,7 @@ import httpx
 
 
 TOOL_DESCRIPTIONS = {
-    "workload_state": "Read the target Deployment and its Pods, including rollout, restart, image and HTTP readiness-probe state.",
+    "workload_state": "Read the target Deployment or Argo Rollout and its Pods, including restart, image and HTTP readiness-probe state.",
     "recent_events": "Read recent Kubernetes events in the target namespace.",
     "bounded_logs": "Read at most 8 KiB of recent logs from one target Pod.",
     "service_metrics": "Read fixed CPU and restart metrics for the target namespace.",
@@ -65,15 +65,23 @@ class KubernetesDiagnostics:
         prefix = f"/api/v1/namespaces/{quote(namespace)}"
 
         if name == "workload_state":
-            deployment = self._get(f"/apis/apps/v1/namespaces/{quote(namespace)}/deployments/{quote(workload)}")
+            kind = "Deployment"
+            try:
+                deployment = self._get(f"/apis/apps/v1/namespaces/{quote(namespace)}/deployments/{quote(workload)}")
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code != 404:
+                    raise
+                deployment = self._get(f"/apis/argoproj.io/v1alpha1/namespaces/{quote(namespace)}/rollouts/{quote(workload)}")
+                kind = "Rollout"
             selector = deployment.get("spec", {}).get("selector", {}).get("matchLabels", {})
             if not selector:
-                raise ValueError("Deployment has no exact pod selector")
+                raise ValueError(f"{kind} has no exact pod selector")
             label_selector = ",".join(f"{key}={value}" for key, value in sorted(selector.items()))
             pods = self._get(f"{prefix}/pods", {"labelSelector": label_selector, "limit": 20})
             containers = deployment.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
             return {
                 "deployment": {
+                    "kind": kind,
                     "name": workload,
                     "generation": deployment.get("metadata", {}).get("generation"),
                     "observed_generation": deployment.get("status", {}).get("observedGeneration"),

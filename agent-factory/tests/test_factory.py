@@ -106,6 +106,38 @@ class FactoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "read-only registry"):
             KubernetesDiagnostics(api_client=api, metrics_client=Mock()).execute("delete_pod", {}, "staging")
 
+    def test_diagnostic_adapter_reads_rollout_only_after_deployment_404(self):
+        import httpx
+        from unittest.mock import Mock
+
+        api = Mock()
+        missing = httpx.Response(404, request=httpx.Request("GET", "https://kubernetes.test/deployments/api"))
+        forbidden = httpx.Response(403, request=httpx.Request("GET", "https://kubernetes.test/deployments/api"))
+        rollout = {"metadata": {"generation": 1},
+                   "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "api"}},
+                            "template": {"spec": {"containers": [{"name": "api", "image": IMAGE,
+                                "readinessProbe": {"httpGet": {"path": "/api/missing-readyz", "port": "http"}}}]}}},
+                   "status": {"observedGeneration": 1}}
+        pods = {"items": [{"metadata": {"name": "api-1"}, "status": {"phase": "Running"}}]}
+        missing_result = Mock()
+        missing_result.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "not found", request=missing.request, response=missing)
+        api.get.side_effect = [missing_result, Mock(json=lambda: rollout), Mock(json=lambda: pods)]
+        result = KubernetesDiagnostics(api_client=api, metrics_client=Mock()).execute(
+            "workload_state", {"namespace": "staging", "workload": "api"}, "staging")
+        self.assertEqual(result["deployment"]["kind"], "Rollout")
+        self.assertEqual(result["deployment"]["ready"], 0)
+        self.assertEqual(result["deployment"]["containers"][0]["readiness_http_get"]["path"], "/api/missing-readyz")
+        self.assertEqual(api.get.call_args_list[1].args[0], "/apis/argoproj.io/v1alpha1/namespaces/staging/rollouts/api")
+
+        forbidden_result = Mock()
+        forbidden_result.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "forbidden", request=forbidden.request, response=forbidden)
+        api.get.side_effect = [forbidden_result]
+        with self.assertRaises(httpx.HTTPStatusError):
+            KubernetesDiagnostics(api_client=api, metrics_client=Mock()).execute(
+                "workload_state", {"namespace": "staging", "workload": "api"}, "staging")
+
     def test_common_credentials_are_masked_before_log_evidence(self):
         value = 'Authorization: Bearer abc.def password="secret" api_key=hidden'
         redacted = redact(value)
