@@ -12,7 +12,7 @@ from .publish import create_draft, version_request
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["validate", "validate-evals", "publish", "release", "candidate", "promote", "rollback", "serve", "broker", "handoff", "fix-fetch", "fix-propose", "fix-validate", "fix-publish"])
+    parser.add_argument("command", choices=["validate", "validate-evals", "publish", "release", "candidate", "pin", "promote", "rollback", "serve", "broker", "handoff", "fix-fetch", "fix-propose", "fix-validate", "fix-publish"])
     parser.add_argument("--agent", type=Path)
     parser.add_argument("--image")
     parser.add_argument("--revision")
@@ -127,9 +127,9 @@ def main():
             print(f"Valid evaluation case: {case.id} v{case.version}")
         return
 
-    if args.command in {"promote", "rollback"}:
+    if args.command in {"pin", "promote", "rollback"}:
         if not all((args.agent, args.image, args.revision, args.base_version, args.target_version, args.evidence)):
-            parser.error("promote/rollback require --agent, --image, --revision, --base-version, --target-version and --evidence")
+            parser.error("pin/promote/rollback require --agent, --image, --revision, --base-version, --target-version and --evidence")
         from .release import change_route, validate_route_evidence
 
         request = version_request(load_agent(args.agent), args.image, args.revision, draft=False)

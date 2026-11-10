@@ -135,8 +135,16 @@ separate from offline deterministic unit tests.
 
 ## Candidate validation
 
-After an operator fixes the ordinary Invocations endpoint to the current
-numeric version at 100%, set `release.mode: candidate` and
+Before the first candidate, set `release.mode: pin`, `release.baseVersion:
+"@latest"`, and `release.targetVersion` to the sole Active hosted version.
+Supply that version's image digest and source revision in `agent`, a current
+publisher image in `publisher.image`, and a reviewed HTTPS reference in
+`release.evidence`. The Job verifies there is exactly one hosted version,
+patches only the route selector, and reads the endpoint back. It refuses an
+ambiguous `@latest` route. Reapplying an already pinned route is a no-op.
+
+Once the ordinary Invocations endpoint is fixed to the current numeric
+version at 100%, set `release.mode: candidate` and
 `release.baseVersion` to that version in the publisher chart. The Job verifies
 the route before and after creating or reusing the digest-pinned candidate,
 waits for it to become active, and sends its smoke input through a Foundry
@@ -153,13 +161,13 @@ not automated.
 
 ## Reviewed route changes
 
-The publisher chart supports `release.mode: promote` and `rollback` after a
-candidate is Active. It verifies the current endpoint is fixed at the declared
-`baseVersion`, the target version is Active with the declared image digest and
-source revision, and an operator-supplied evidence document matches those
-inputs. Promotion requires all six standard factory automated checks to pass
-and a separate reviewed HTTPS approval reference. Rollback requires that
-reference and a reason. Evidence is metadata only; Helm stores it in its
+The publisher chart supports `release.mode: pin` for the initial route, then
+`promote` and `rollback` after a candidate is Active. It verifies the declared
+base route and Active target version with its image digest and source revision.
+An operator-supplied evidence document must match those inputs. Promotion
+requires all six standard factory automated checks to pass and a separate
+reviewed HTTPS approval reference. Rollback requires that reference and a
+reason. Evidence is metadata only; Helm stores it in its
 release Secret and the Job mounts a short-lived ConfigMap. Use one Helm release
 name per route-change identity, then uninstall it after verifying the Job.
 
@@ -209,5 +217,4 @@ independent verification of reviewer identity or candidate-specific diagnostic
 quality. The offline evaluator currently tests a model route and recorded
 fixtures; it does not prove a hosted candidate passed those cases. Live route
 changes require separate operator approval. The current rebuilt SRE endpoint
-still needs an explicitly reviewed first pin from `@latest` before the existing
-candidate and route-change paths can be used.
+needs the reviewed initial pin before candidate publication.

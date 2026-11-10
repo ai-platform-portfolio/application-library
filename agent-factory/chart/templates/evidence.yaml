@@ -1,4 +1,4 @@
-{{- if has (.Values.release.mode | default "first") (list "promote" "rollback") }}
+{{- if has (.Values.release.mode | default "first") (list "pin" "promote" "rollback") }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
