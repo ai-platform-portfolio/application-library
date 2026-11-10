@@ -1,0 +1,20 @@
+agent:
+  id: ""
+  image: ""
+  revision: ""
+  version: ""
+
+target:
+  namespace: ""
+  workload: ""
+
+events:
+  bus: platform
+
+broker:
+  namespace: foundry-publisher
+  serviceAccountName: foundry-diagnostic-broker
+  identityConfigMap: foundry-diagnostic-broker-identity
+  configMap: foundry-diagnostic-broker
+  otlpTracesEndpoint: http://opentelemetry-collector.opentelemetry.svc.cluster.local:4318/v1/traces
+  mimirQueryUrl: http://mimir-gateway.lgtm.svc.cluster.local/prometheus

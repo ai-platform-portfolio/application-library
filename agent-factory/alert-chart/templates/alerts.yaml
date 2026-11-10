@@ -1,0 +1,211 @@
+{{- $id := required "agent.id is required" .Values.agent.id -}}
+{{- $image := required "agent.image is required" .Values.agent.image -}}
+{{- $revision := required "agent.revision is required" .Values.agent.revision -}}
+{{- $version := required "agent.version is required" .Values.agent.version | toString -}}
+{{- $target := required "target.namespace is required" .Values.target.namespace -}}
+{{- $workload := required "target.workload is required" .Values.target.workload -}}
+{{- $brokerNamespace := .Values.broker.namespace -}}
+{{- $name := printf "agent-alert-%s" $id -}}
+{{- if not (regexMatch "^[a-z][a-z0-9-]{0,15}$" $id) -}}{{- fail "agent.id must be a DNS label of at most 16 characters" -}}{{- end -}}
+{{- range $field, $value := dict "target.namespace" $target "target.workload" $workload "broker.namespace" $brokerNamespace -}}
+  {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $value) -}}{{- fail (printf "%s must be a DNS label" $field) -}}{{- end -}}
+{{- end -}}
+{{- if not (regexMatch "^[a-f0-9]{40}$" $revision) -}}{{- fail "agent.revision must be a full Git commit SHA" -}}{{- end -}}
+{{- if not (regexMatch "^[0-9]+$" $version) -}}{{- fail "agent.version must be a concrete release number" -}}{{- end -}}
+{{- if not (regexMatch "^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$" $image) -}}{{- fail "agent.image must be registry-qualified and digest-pinned" -}}{{- end -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+
+---
+# Source can watch only the selected namespace's Events.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-watch
+  namespace: {{ $target }}
+rules:
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [get, list, watch]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-watch
+  namespace: {{ $target }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $name }}-watch}
+subjects:
+  - {kind: ServiceAccount, name: {{ $name }}, namespace: {{ .Release.Namespace }}}
+
+---
+# Sensor can create only Jobs, in the broker namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-dispatch
+  namespace: {{ $brokerNamespace }}
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-dispatch
+  namespace: {{ $brokerNamespace }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $name }}-dispatch}
+subjects:
+  - {kind: ServiceAccount, name: {{ $name }}, namespace: {{ .Release.Namespace }}}
+
+---
+# The model receives a fixed investigation request; Event text cannot inject instructions.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-incident
+  namespace: {{ $brokerNamespace }}
+data:
+  incident.json: {{ dict "namespace" $target "workload" $workload "summary" "Kubernetes reported an Unhealthy readiness event for the selected workload. Investigate current state; do not assume the event proves an ongoing fault or a recovery." | toJson | quote }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-diagnostics
+  namespace: {{ $target }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: foundry-diagnostic-broker-read}
+subjects:
+  - {kind: ServiceAccount, name: {{ .Values.broker.serviceAccountName }}, namespace: {{ $brokerNamespace }}}
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: {{ $name }}
+spec:
+  eventBusName: {{ .Values.events.bus }}
+  template:
+    serviceAccountName: {{ $name }}
+    nodeSelector: {agentpool: platform}
+    container:
+      resources:
+        requests: {cpu: 10m, memory: 64Mi}
+        limits: {memory: 256Mi}
+  resource:
+    readiness:
+      namespace: {{ $target }}
+      group: ""
+      version: v1
+      resource: events
+      eventTypes: [ADD, UPDATE]
+      filter:
+        afterStart: false
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: {{ $name }}
+spec:
+  eventBusName: {{ .Values.events.bus }}
+  template:
+    serviceAccountName: {{ $name }}
+    nodeSelector: {agentpool: platform}
+    container:
+      resources:
+        requests: {cpu: 10m, memory: 64Mi}
+        limits: {memory: 256Mi}
+  dependencies:
+    - name: readiness
+      eventSourceName: {{ $name }}
+      eventName: readiness
+      filters:
+        data:
+          - {path: type, type: string, value: ['^(ADD|UPDATE)$']}
+          - {path: body.type, type: string, value: ['^Warning$']}
+          - {path: body.reason, type: string, value: ['^Unhealthy$']}
+          - {path: body.message, type: string, value: ['^Readiness probe failed:']}
+          - {path: body.involvedObject.kind, type: string, value: ['^Pod$']}
+          - {path: body.involvedObject.name, type: string, value: [{{ printf "^%s-" $workload | quote }}]}
+          - {path: body.metadata.uid, type: string, value: ['^[a-f0-9-]{36}$']}
+  triggers:
+    - template:
+        name: diagnose
+        k8s:
+          operation: create
+          source:
+            resource:
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: {{ printf "diag-%s-" $id }}
+                namespace: {{ $brokerNamespace }}
+                labels:
+                  app.kubernetes.io/name: foundry-agent-diagnostics
+                  app.kubernetes.io/part-of: agent-factory
+                annotations:
+                  agent-factory/source-revision: {{ $revision | quote }}
+                  agent-factory/image: {{ $image | quote }}
+              spec:
+                backoffLimit: 0
+                activeDeadlineSeconds: 900
+                ttlSecondsAfterFinished: 86400
+                template:
+                  spec:
+                    serviceAccountName: {{ .Values.broker.serviceAccountName }}
+                    restartPolicy: Never
+                    securityContext:
+                      runAsNonRoot: true
+                      runAsUser: 10001
+                      runAsGroup: 10001
+                      seccompProfile: {type: RuntimeDefault}
+                    containers:
+                      - name: broker
+                        image: {{ $image | quote }}
+                        imagePullPolicy: IfNotPresent
+                        command: [python, -m, portfolio_agent_factory]
+                        args: [broker, --agent, {{ printf "agents/%s.yaml" $id | quote }}, --version, {{ $version | quote }}, --incident, /var/run/agent-incident/incident.json, --namespace, {{ $target | quote }}]
+                        env:
+                          - name: AZURE_CLIENT_ID
+                            valueFrom:
+                              configMapKeyRef: {name: {{ .Values.broker.identityConfigMap }}, key: clientId}
+                          - name: AZURE_TENANT_ID
+                            valueFrom:
+                              configMapKeyRef: {name: {{ .Values.broker.configMap }}, key: tenantId}
+                          - name: FOUNDRY_PROJECT_ENDPOINT
+                            valueFrom:
+                              configMapKeyRef: {name: {{ .Values.broker.configMap }}, key: projectEndpoint}
+                          - {name: AZURE_FEDERATED_TOKEN_FILE, value: /var/run/secrets/azure/tokens/azure-identity-token}
+                          - {name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, value: {{ .Values.broker.otlpTracesEndpoint | quote }}}
+                          - {name: MIMIR_QUERY_URL, value: {{ .Values.broker.mimirQueryUrl | quote }}}
+                        resources:
+                          requests: {cpu: 100m, memory: 256Mi}
+                          limits: {cpu: '1', memory: 1Gi}
+                        securityContext:
+                          allowPrivilegeEscalation: false
+                          readOnlyRootFilesystem: true
+                          capabilities: {drop: [ALL]}
+                        volumeMounts:
+                          - {name: incident, mountPath: /var/run/agent-incident, readOnly: true}
+                          - {name: azure-identity-token, mountPath: /var/run/secrets/azure/tokens, readOnly: true}
+                    volumes:
+                      - name: incident
+                        configMap:
+                          name: {{ $name }}-incident
+                      - name: azure-identity-token
+                        projected:
+                          sources:
+                            - serviceAccountToken: {audience: api://AzureADTokenExchange, expirationSeconds: 3600, path: azure-identity-token}
+          parameters:
+            # Kubernetes Event UID is stable across repeat-count updates. A 24h Job
+            # retention window makes duplicate deliveries an AlreadyExists no-op.
+            - src: {dependencyName: readiness, dataKey: body.metadata.uid}
+              dest: metadata.name
+              operation: append
+      retryStrategy: {steps: 2}
+      rateLimit: {unit: Minute, requestsPerUnit: 2}
