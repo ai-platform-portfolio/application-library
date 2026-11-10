@@ -1,0 +1,4 @@
+apiVersion: v2
+name: foundry-agent-alerts
+version: 0.1.0
+description: Scoped Kubernetes event intake for read-only Foundry diagnostics
