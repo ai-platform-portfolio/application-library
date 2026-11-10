@@ -1,0 +1,36 @@
+agent:
+  id: ""
+  image: ""
+  revision: ""
+
+model:
+  deployment: chat
+  identityConfigMap: foundry-coding-worker-identity
+  projectConfigMap: foundry-diagnostic-broker
+
+github:
+  appId: ""
+  installationId: ""
+  keySecretName: argocd-github-app
+  keySecretKey: private-key
+
+policy:
+  repository: ""
+  base_ref: ""
+  base_sha: ""
+  incident_id: ""
+  editable_paths: []
+  checks: []
+  instructions: ""
+
+diagnosis:
+  answer: ""
+  trace_id: ""
+
+publish:
+  enabled: false
+
+job:
+  serviceAccountName: foundry-coding-worker
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 1800

@@ -7,6 +7,14 @@ version, and the selected Kubernetes namespace/workload. Agent-specific values
 belong with the agent catalog; this chart owns the EventSource, Sensor, scoped
 RBAC, fixed incident input and short-lived broker Job.
 
+For persistent reconciliation, an operator renders only
+`templates/argocd/application.yaml` with `registration.enabled=true`, a pinned
+library Git URL/commit, and the same release inputs, then applies that Argo
+Application once. Its child values set `registration.enabled=false`; child
+reconciliation cannot register itself. Removing the Application prunes the
+alert resources. Repository/PR-derived target namespace and immutable image
+must come from the release inputs, not from a copied chart manifest.
+
 The EventSource watches only Events in the selected namespace. The Sensor
 accepts Warning/Unhealthy readiness-probe Events for Pods whose names start
 with the selected workload. The Event UID becomes the Job name suffix, so

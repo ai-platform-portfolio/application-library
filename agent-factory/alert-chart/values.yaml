@@ -11,6 +11,11 @@ target:
 events:
   bus: platform
 
+registration:
+  enabled: false
+  repository: ""
+  revision: ""
+
 broker:
   namespace: foundry-publisher
   serviceAccountName: foundry-diagnostic-broker

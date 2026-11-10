@@ -58,6 +58,18 @@ class AlertChartTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("digest-pinned", result.stderr)
 
+    def test_registration_renders_only_child_application(self):
+        result = render("--set", "registration.enabled=true",
+                        "--set", "registration.repository=https://github.com/ai-platform-portfolio/application-library.git",
+                        "--set", "registration.revision=" + "c" * 40)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        docs = [item for item in yaml.safe_load_all(result.stdout) if item]
+        self.assertEqual([item["kind"] for item in docs], ["Application"])
+        app = docs[0]
+        self.assertEqual(app["metadata"]["namespace"], "argocd")
+        self.assertFalse(app["spec"]["source"]["helm"]["valuesObject"]["registration"]["enabled"])
+        self.assertEqual(app["spec"]["destination"]["namespace"], "cluster-onboarding")
+
 
 if __name__ == "__main__":
     unittest.main()
