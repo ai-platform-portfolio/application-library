@@ -11,6 +11,13 @@ requests **write** token. It checks the exact base and validation record,
 creates a branch through the GitHub Git Data API and opens a draft PR. It
 never executes repository code. The Job cannot merge or deploy.
 
+Validation executes repository code with no mounted cloud credential or
+Kubernetes service account token. Egress isolation is not established: the
+platform's NetworkPolicies are currently staged but not enforced. Treat
+source and tests as untrusted, inspect the selected repository and checks
+before enabling publication, and do not claim this chart provides a network
+sandbox. Enforcing that boundary needs a separately reviewed network change.
+
 The existing GitHub App key stays in `argocd`; ESO requests separate one-hour
 read and write tokens for the selected repository, renewing them every 15
 minutes. Reflector copies only those tokens into `foundry-publisher`. The
