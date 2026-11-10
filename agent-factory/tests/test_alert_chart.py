@@ -35,9 +35,13 @@ class AlertChartTests(unittest.TestCase):
         source = docs["EventSource", name]["spec"]
         self.assertEqual(source["resource"]["readiness"]["namespace"], "preview-test")
         self.assertEqual(source["resource"]["readiness"]["resource"], "events")
+        self.assertEqual(source["resource"]["readiness"]["eventTypes"], ["ADD"])
+        self.assertFalse(source["resource"]["readiness"]["filter"]["afterStart"])
 
         sensor = docs["Sensor", name]["spec"]
         filters = sensor["dependencies"][0]["filters"]["data"]
+        event_type = next(item for item in filters if item["path"] == "type")
+        self.assertEqual(event_type["value"], ["^ADD$"])
         self.assertIn("body.message", {item["path"] for item in filters})
         trigger = sensor["triggers"][0]
         self.assertEqual(trigger["template"]["k8s"]["parameters"][0]["dest"], "metadata.name")
