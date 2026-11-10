@@ -23,3 +23,21 @@ broker:
   configMap: foundry-diagnostic-broker
   otlpTracesEndpoint: http://opentelemetry-collector.opentelemetry.svc.cluster.local:4318/v1/traces
   mimirQueryUrl: http://mimir-gateway.lgtm.svc.cluster.local/prometheus
+
+handoff:
+  enabled: false
+  publish: false
+  requiredEvidence: []
+  requireDegradedWorkload: false
+
+# The same policy and App metadata used by fix-chart may be overlaid here.
+github:
+  appId: ""
+  installationId: ""
+
+policy:
+  repository: ""
+  base_ref: ""
+  editable_paths: []
+  checks: []
+  instructions: ""

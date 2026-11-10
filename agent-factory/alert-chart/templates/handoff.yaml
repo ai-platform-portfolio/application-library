@@ -1,0 +1,257 @@
+{{- if and .Values.handoff.enabled (not .Values.registration.enabled) }}
+{{- $id := required "agent.id is required" .Values.agent.id -}}
+{{- $target := required "target.namespace is required" .Values.target.namespace -}}
+{{- $workload := required "target.workload is required" .Values.target.workload -}}
+{{- $brokerNamespace := .Values.broker.namespace -}}
+{{- $name := printf "agent-alert-%s-%s" $id (sha256sum (printf "%s/%s" $target $workload) | trunc 8) -}}
+{{- $repo := required "policy.repository is required" .Values.policy.repository -}}
+{{- $ref := required "policy.base_ref is required" .Values.policy.base_ref -}}
+{{- $appId := required "github.appId is required" .Values.github.appId | toString -}}
+{{- $installId := required "github.installationId is required" .Values.github.installationId | toString -}}
+{{- if not (and (kindIs "slice" .Values.handoff.requiredEvidence) (gt (len .Values.handoff.requiredEvidence) 0)) -}}{{- fail "handoff.requiredEvidence must list trusted tools" -}}{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" $repo) -}}{{- fail "handoff repository must be owner/repository" -}}{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9._/-]{1,100}$" $ref) -}}{{- fail "handoff base_ref must be a Git ref" -}}{{- end -}}
+{{- if not (regexMatch "^[0-9]+$" $appId) -}}{{- fail "handoff appId must be numeric" -}}{{- end -}}
+{{- if not (regexMatch "^[0-9]+$" $installId) -}}{{- fail "handoff installationId must be numeric" -}}{{- end -}}
+{{- $sourceToken := printf "%s-source-read" $name -}}
+{{- $handoffAccount := printf "%s-handoff" $name -}}
+{{- $intent := dict
+  "agent" (dict "id" $id "image" .Values.agent.image "revision" .Values.agent.revision)
+  "github" (dict "appId" $appId "installationId" $installId)
+  "policy" .Values.policy
+  "publish" .Values.handoff.publish
+  "required_evidence" .Values.handoff.requiredEvidence
+  "target" (dict "namespace" $target "workload" $workload)
+  "broker_service_account" .Values.broker.serviceAccountName
+-}}
+# The static source token can only read the declared repository. The diagnostic
+# broker does not mount it; the separate handoff Job resolves a full base SHA.
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: GithubAccessToken
+metadata:
+  name: {{ $sourceToken }}
+  namespace: argocd
+spec:
+  appID: {{ $appId | quote }}
+  installID: {{ $installId | quote }}
+  repositories: [{{ index (splitList "/" $repo) 1 | quote }}]
+  permissions: {contents: read}
+  auth:
+    privateKey:
+      secretRef: {name: argocd-github-app, key: private-key}
+
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: {{ $sourceToken }}
+  namespace: argocd
+spec:
+  refreshInterval: 15m
+  target:
+    name: {{ $sourceToken }}
+    creationPolicy: Owner
+    template:
+      mergePolicy: Merge
+      metadata:
+        annotations:
+          reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+          reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: {{ printf "^%s$" $brokerNamespace | quote }}
+          reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+          reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: {{ printf "^%s$" $brokerNamespace | quote }}
+  dataFrom:
+    - sourceRef:
+        generatorRef:
+          apiVersion: generators.external-secrets.io/v1alpha1
+          kind: GithubAccessToken
+          name: {{ $sourceToken }}
+
+---
+# The EventSource watches diagnostic Pods only in the broker namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-pods-watch
+  namespace: {{ $brokerNamespace }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-pods-watch
+  namespace: {{ $brokerNamespace }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $name }}-pods-watch}
+subjects:
+  - {kind: ServiceAccount, name: {{ $name }}, namespace: {{ .Release.Namespace }}}
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $handoffAccount }}
+  namespace: {{ $brokerNamespace }}
+
+---
+# Only the handoff identity can create and remove temporary fix resources.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $handoffAccount }}
+  namespace: {{ $brokerNamespace }}
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, list, watch, delete]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [create, get, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $handoffAccount }}
+  namespace: {{ $brokerNamespace }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $handoffAccount }}}
+subjects:
+  - {kind: ServiceAccount, name: {{ $handoffAccount }}, namespace: {{ $brokerNamespace }}}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $handoffAccount }}
+  namespace: argocd
+rules:
+  - apiGroups: [generators.external-secrets.io]
+    resources: [githubaccesstokens]
+    verbs: [create, get, delete]
+  - apiGroups: [external-secrets.io]
+    resources: [externalsecrets]
+    verbs: [create, get, delete]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $handoffAccount }}
+  namespace: argocd
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $handoffAccount }}}
+subjects:
+  - {kind: ServiceAccount, name: {{ $handoffAccount }}, namespace: {{ $brokerNamespace }}}
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-handoff-intent
+  namespace: {{ $brokerNamespace }}
+data:
+  intent.json: {{ toJson $intent | quote }}
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: {{ $name }}-handoff
+spec:
+  eventBusName: {{ .Values.events.bus }}
+  template:
+    serviceAccountName: {{ $name }}
+    nodeSelector: {agentpool: platform}
+    container:
+      resources:
+        requests: {cpu: 10m, memory: 64Mi}
+        limits: {memory: 256Mi}
+  dependencies:
+    - name: diagnostic
+      eventSourceName: {{ $name }}
+      eventName: diagnostic
+      filters:
+        data:
+          - {path: type, type: string, value: ['^UPDATE$']}
+          - {path: body.metadata.labels.agent-factory-diagnostic, type: string, value: [{{ printf "^%s$" $name | quote }}]}
+          - {path: body.status.phase, type: string, value: ['^Succeeded$']}
+          - {path: body.status.containerStatuses.0.state.terminated.exitCode, type: number, value: ['^0$']}
+          - {path: body.status.containerStatuses.0.state.terminated.message, type: string, value: ['^[{]']}
+  triggers:
+    - template:
+        name: handoff
+        k8s:
+          operation: create
+          source:
+            resource:
+              apiVersion: batch/v1
+              kind: Job
+              metadata:
+                name: {{ printf "handoff-%s-" $id }}
+                namespace: {{ $brokerNamespace }}
+                labels:
+                  app.kubernetes.io/name: foundry-agent-handoff
+                  app.kubernetes.io/part-of: agent-factory
+              spec:
+                backoffLimit: 1
+                activeDeadlineSeconds: 2400
+                ttlSecondsAfterFinished: 86400
+                template:
+                  spec:
+                    serviceAccountName: {{ $handoffAccount }}
+                    restartPolicy: Never
+                    securityContext:
+                      runAsNonRoot: true
+                      runAsUser: 10001
+                      runAsGroup: 10001
+                      seccompProfile: {type: RuntimeDefault}
+                    containers:
+                      - name: handoff
+                        image: {{ .Values.agent.image | quote }}
+                        imagePullPolicy: IfNotPresent
+                        command: [python, -m, portfolio_agent_factory]
+                        args: [handoff, --policy, /var/run/agent-handoff/intent.json]
+                        env:
+                          - {name: DIAGNOSTIC_MARKER, value: ""}
+                          - {name: DIAGNOSTIC_POD, value: ""}
+                          - {name: INCIDENT_ID, value: ""}
+                          - name: GITHUB_READ_TOKEN
+                            valueFrom:
+                              secretKeyRef: {name: {{ $sourceToken }}, key: token}
+                          - {name: HELM_CACHE_HOME, value: /tmp/helm-cache}
+                          - {name: HELM_CONFIG_HOME, value: /tmp/helm-config}
+                          - {name: HELM_DATA_HOME, value: /tmp/helm-data}
+                        resources:
+                          requests: {cpu: 100m, memory: 128Mi}
+                          limits: {cpu: '1', memory: 512Mi}
+                        securityContext:
+                          allowPrivilegeEscalation: false
+                          readOnlyRootFilesystem: true
+                          capabilities: {drop: [ALL]}
+                        volumeMounts:
+                          - {name: intent, mountPath: /var/run/agent-handoff, readOnly: true}
+                          - {name: tmp, mountPath: /tmp}
+                    volumes:
+                      - name: intent
+                        configMap: {name: {{ $name }}-handoff-intent}
+                      - {name: tmp, emptyDir: {sizeLimit: 20Mi}}
+          parameters:
+            - src: {dependencyName: diagnostic, dataKey: body.metadata.uid}
+              dest: metadata.name
+              operation: append
+            - src: {dependencyName: diagnostic, dataKey: body.status.containerStatuses.0.state.terminated.message}
+              dest: spec.template.spec.containers.0.env.0.value
+            - src: {dependencyName: diagnostic, dataKey: body.metadata.name}
+              dest: spec.template.spec.containers.0.env.1.value
+            - src: {dependencyName: diagnostic, dataKey: body.metadata.labels.agent-factory-incident}
+              dest: spec.template.spec.containers.0.env.2.value
+      retryStrategy: {steps: 2}
+      rateLimit: {unit: Minute, requestsPerUnit: 2}
+{{- end }}

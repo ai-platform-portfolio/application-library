@@ -35,6 +35,38 @@ consume Mimir Alertmanager alerts. Each additional alert producer needs its
 own authenticated source and mapping; this chart is the first concrete event
 source for the reusable diagnostic runtime.
 
+## Optional coding handoff
+
+Set `handoff.enabled=true` for a reviewed alert registration. Overlay the same
+agent policy used by `fix-chart` as top-level `policy` values, and supply the
+target's source branch as `policy.base_ref`. Supply the existing GitHub App
+ID/installation ID as top-level `github` values. `handoff.requiredEvidence`
+lists the diagnostic tools that must be cited before coding. The chart
+defaults to no handoff and no publication; `handoff.publish=true` explicitly
+permits a **draft** PR after validation succeeds.
+`handoff.requireDegradedWorkload=true` adds a deterministic readiness gate:
+desired replicas must exceed ready replicas and a recent Unhealthy readiness
+Event must be present. The SRE catalog enables this gate.
+
+The diagnostic Pod retains its read-only identity. Its termination message
+contains only a decision, trace ID and SHA-256 of its final bounded JSON log.
+A second Argo Events Sensor watches successful diagnostic Pods. Its separate
+handoff Job checks Pod ownership, broker ServiceAccount, pinned image/revision,
+target, cited evidence and the log checksum. Abstention stops before source
+lookup or creation of fix resources. For an actionable result, a repository-
+scoped read token resolves the declared branch to a full Git SHA. The handoff
+renders the existing `fix-chart` and creates its temporary scoped token and
+worker resources. Model output cannot choose the repository, branch, edit
+scope, validation commands or publication mode.
+
+The handoff watches the worker Job, removes temporary token resources and
+input ConfigMap after termination, and leaves worker Pod logs for the chart's
+one-hour Job TTL. A handoff that exhausts retries can leave temporary ESO
+resources; inspect and remove that incident's generated resources before a
+manual retry. Live fault-injection acceptance is still required. A draft PR
+requires human diff and CI review. This path does not establish network egress
+isolation for validation containers.
+
 Before enabling on a workload, render with the actual namespace, release
 image/revision/version and run a server dry-run. Then inject a controlled
 readiness failure in an isolated preview, confirm one broker Job per Event UID,

@@ -12,7 +12,7 @@ from .publish import create_draft, version_request
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["validate", "validate-evals", "publish", "release", "candidate", "promote", "rollback", "serve", "broker", "fix-fetch", "fix-propose", "fix-validate", "fix-publish"])
+    parser.add_argument("command", choices=["validate", "validate-evals", "publish", "release", "candidate", "promote", "rollback", "serve", "broker", "handoff", "fix-fetch", "fix-propose", "fix-validate", "fix-publish"])
     parser.add_argument("--agent", type=Path)
     parser.add_argument("--image")
     parser.add_argument("--revision")
@@ -33,7 +33,22 @@ def main():
     parser.add_argument("--validation", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--model")
+    parser.add_argument("--handoff", action="store_true")
+    parser.add_argument("--result")
+    parser.add_argument("--pod")
+    parser.add_argument("--incident-id")
     args = parser.parse_args()
+
+    if args.command == "handoff":
+        marker = args.result or os.getenv("DIAGNOSTIC_MARKER")
+        pod = args.pod or os.getenv("DIAGNOSTIC_POD")
+        incident_id = args.incident_id or os.getenv("INCIDENT_ID")
+        if not args.policy or not marker or not pod or not incident_id:
+            parser.error("handoff requires --policy, --result, --pod and --incident-id")
+        from .handoff import main as handoff
+
+        handoff(args.policy, marker, pod, incident_id)
+        return
 
     if args.command.startswith("fix-"):
         from .fix import fetch, load_policy, propose, publication_ready, publish, read_json, validate, write_json
@@ -85,7 +100,8 @@ def main():
             parser.error("broker requires --agent, --incident, --namespace, --version and --project-endpoint")
         from .broker import main as investigate
 
-        investigate(args.agent, args.incident, args.project_endpoint, args.namespace, args.version)
+        investigate(args.agent, args.incident, args.project_endpoint, args.namespace, args.version,
+                    handoff=args.handoff)
         return
 
     if args.command == "validate":

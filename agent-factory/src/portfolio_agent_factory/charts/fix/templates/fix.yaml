@@ -54,6 +54,7 @@ spec:
   refreshInterval: 15m
   target:
     name: {{ printf "%s-%s" $name $mode }}
+    creationPolicy: Owner
     template:
       mergePolicy: Merge
       metadata:

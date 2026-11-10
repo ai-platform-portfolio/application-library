@@ -1,6 +1,7 @@
 """Execute hosted-agent tool requests from inside AKS with read-only credentials."""
 
 import json
+import hashlib
 import os
 from pathlib import Path
 
@@ -26,7 +27,42 @@ def load_incident(path: Path) -> dict:
     return incident
 
 
-def run_broker(agent, incident: dict, project_endpoint: str, namespace: str, *, version=None, credential=None, executor=None, invoker=None, session_id=None) -> dict:
+def triage_answer(answer: str, used_tools: list[str], required_evidence: list[str]) -> dict:
+    """Fail closed on an unstructured answer before an alert can start coding."""
+    try:
+        result = json.loads(answer)
+    except json.JSONDecodeError as error:
+        raise ValueError("Alert diagnosis must be structured JSON") from error
+    if not isinstance(result, dict) or set(result) != {"decision", "answer", "evidence"}:
+        raise ValueError("Alert diagnosis has unexpected fields")
+    if result["decision"] not in {"actionable", "abstain"}:
+        raise ValueError("Alert diagnosis has invalid decision")
+    if not isinstance(result["answer"], str) or not 20 <= len(result["answer"]) <= 2500:
+        raise ValueError("Alert diagnosis answer must be 20-2500 characters")
+    if not isinstance(result["evidence"], list) or not all(
+        isinstance(item, str) and item in used_tools for item in result["evidence"]
+    ) or len(set(result["evidence"])) != len(result["evidence"]):
+        raise ValueError("Alert diagnosis must cite used tools only")
+    if result["decision"] == "actionable" and not set(required_evidence) <= set(result["evidence"]):
+        raise ValueError("Actionable diagnosis lacks required evidence")
+    return result
+
+
+def degraded_readiness(history: list[dict]) -> bool:
+    evidence = {entry["name"]: entry["result"] for entry in history}
+    workload = evidence.get("workload_state", {}).get("deployment", {})
+    desired, ready = workload.get("desired"), workload.get("ready")
+    if not isinstance(desired, int) or desired < 1 or not isinstance(ready, int) or ready >= desired:
+        return False
+    events = evidence.get("recent_events", {}).get("events", [])
+    return isinstance(events, list) and any(
+        isinstance(event, dict) and event.get("reason") == "Unhealthy" and
+        str(event.get("message", "")).startswith("Readiness probe failed:")
+        for event in events
+    )
+
+
+def run_broker(agent, incident: dict, project_endpoint: str, namespace: str, *, version=None, credential=None, executor=None, invoker=None, session_id=None, require_triage=False, required_evidence=None, require_degraded=False) -> dict:
     """Keep the bounded tool loop in the broker; no Kubernetes token enters Foundry."""
     target(incident, namespace)
     if not agent.tools or not set(agent.tools) <= set(TOOL_DESCRIPTIONS):
@@ -44,8 +80,13 @@ def run_broker(agent, incident: dict, project_endpoint: str, namespace: str, *, 
         if result.get("status") == "final":
             if not isinstance(result.get("answer"), str) or not result["answer"].strip():
                 raise ValueError("Agent returned an empty final answer")
+            triage = triage_answer(result["answer"], [entry["name"] for entry in history],
+                                   required_evidence or []) if require_triage else None
+            if triage and triage["decision"] == "actionable" and require_degraded and not degraded_readiness(history):
+                raise ValueError("Actionable triage requires current degraded readiness and a matching event")
             return {"agent": agent.id, "version": version, "target": {"namespace": namespace, "workload": incident["workload"]},
-                    "answer": result["answer"], "tool_calls": [entry["name"] for entry in history],
+                    "answer": triage["answer"] if triage else result["answer"], "triage": triage,
+                    "tool_calls": [entry["name"] for entry in history],
                     "model_requests": len(history) + 1, "trace_id": result.get("trace_id")}
 
         if result.get("status") != "tool_request" or not isinstance(result.get("tool"), str):
@@ -68,7 +109,7 @@ def run_broker(agent, incident: dict, project_endpoint: str, namespace: str, *, 
     raise RuntimeError("Model-request limit reached")
 
 
-def main(agent_path: Path, incident_path: Path, project_endpoint: str, namespace: str, version: str):
+def main(agent_path: Path, incident_path: Path, project_endpoint: str, namespace: str, version: str, *, handoff=False):
     agent = load_agent(agent_path)
     incident = load_incident(incident_path)
     provider = TracerProvider(resource=Resource.create({"service.name": "foundry-diagnostic-broker"}))
@@ -79,8 +120,21 @@ def main(agent_path: Path, incident_path: Path, project_endpoint: str, namespace
     try:
         with trace.get_tracer(__name__).start_as_current_span("agent.investigation") as span:
             span.set_attribute("langfuse.export", "true")
-            result = run_broker(agent, incident, project_endpoint, namespace, version=version)
+            required_evidence = json.loads(os.getenv("HANDOFF_REQUIRED_EVIDENCE", "[]")) if handoff else []
+            if not isinstance(required_evidence, list) or not required_evidence or not set(required_evidence) <= set(agent.tools):
+                if handoff:
+                    raise ValueError("Handoff requires declared evidence tools")
+            result = run_broker(agent, incident, project_endpoint, namespace, version=version,
+                                require_triage=handoff, required_evidence=required_evidence,
+                                require_degraded=os.getenv("HANDOFF_REQUIRE_DEGRADED") == "true")
             result["broker_trace_id"] = f"{span.get_span_context().trace_id:032x}"
-            print(json.dumps(result))
+            encoded_result = json.dumps(result, sort_keys=True, separators=(",", ":"))
+            print(encoded_result)
+            if handoff:
+                decision = result["triage"]
+                message = {"decision": decision["decision"], "trace_id": result["broker_trace_id"],
+                           "sha256": hashlib.sha256(encoded_result.encode()).hexdigest()}
+                encoded = json.dumps(message, separators=(",", ":"))
+                Path("/dev/termination-log").write_text(encoded)
     finally:
         provider.shutdown()
