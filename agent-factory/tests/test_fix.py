@@ -44,11 +44,19 @@ class FakeResponses:
 
     def create(self, **kwargs):
         self.calls += 1
-        if self.calls == 1:
+        if self.calls > 1:
+            self.assert_tool_result(kwargs["input"])
+        if self.calls <= 2:
             return SimpleNamespace(status="completed", output=[SimpleNamespace(
-                type="function_call", name="read_file", arguments='{"path":"deploy/values.json"}')])
+                type="function_call", name="read_file", call_id=f"call-{self.calls}",
+                arguments='{"path":"deploy/values.json"}')])
         answer = {key: proposal()[key] for key in ("root_cause", "rationale", "changes")}
         return SimpleNamespace(status="completed", output=[], output_text=json.dumps(answer))
+
+    def assert_tool_result(self, history):
+        assert history[-1]["type"] == "function_call_output"
+        assert history[-1]["call_id"] == f"call-{self.calls - 1}"
+        assert json.loads(history[-1]["output"])["path"] == "deploy/values.json"
 
 
 class FixTests(unittest.TestCase):
