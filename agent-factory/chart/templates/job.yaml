@@ -3,11 +3,12 @@
 {{- $revision := required "agent.revision is required" $agent.revision -}}
 {{- $id := required "agent.id is required" $agent.id -}}
 {{- $mode := .Values.release.mode | default "first" -}}
-{{- if not (has $mode (list "first" "candidate" "promote" "rollback")) -}}{{- fail "release.mode must be first, candidate, promote or rollback" -}}{{- end -}}
-{{- $route := has $mode (list "promote" "rollback") -}}
+{{- if not (has $mode (list "first" "candidate" "pin" "promote" "rollback")) -}}{{- fail "release.mode must be first, candidate, pin, promote or rollback" -}}{{- end -}}
+{{- $route := has $mode (list "pin" "promote" "rollback") -}}
 {{- $base := .Values.release.baseVersion | toString -}}
 {{- $target := .Values.release.targetVersion | toString -}}
-{{- if and (or (eq $mode "candidate") $route) (not (regexMatch "^[0-9]+$" $base)) -}}{{- fail "release.baseVersion must be a concrete release number" -}}{{- end -}}
+{{- if and (eq $mode "pin") (ne $base "@latest") -}}{{- fail "release.baseVersion must be @latest for pin" -}}{{- end -}}
+{{- if and (or (eq $mode "candidate") (has $mode (list "promote" "rollback"))) (not (regexMatch "^[0-9]+$" $base)) -}}{{- fail "release.baseVersion must be a concrete release number" -}}{{- end -}}
 {{- if and $route (not (regexMatch "^[0-9]+$" $target)) -}}{{- fail "release.targetVersion must be a concrete release number" -}}{{- end -}}
 {{- if not (regexMatch "^[a-z][a-z0-9-]{1,48}$" $id) -}}{{- fail "agent.id must be a lower-case DNS label" -}}{{- end -}}
 {{- if not (regexMatch "^[a-f0-9]{40}$" $revision) -}}{{- fail "agent.revision must be a full Git commit SHA" -}}{{- end -}}

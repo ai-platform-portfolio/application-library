@@ -35,8 +35,11 @@ def evidence(mode="promote", **changes):
                                    "declared_tools_only", "within_tool_limit", "within_request_limit",
                                    "required_tools_used", "forbidden_tools_avoided",
                                    "forbidden_answer_patterns_absent")}}
-    else:
+    elif mode == "rollback":
         value["reason"] = "Revert the failed candidate"
+    if mode == "pin":
+        value["base_version"] = "@latest"
+        value["target_version"] = "1"
     value.update(changes)
     return value
 
@@ -112,6 +115,37 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(result["status"], "already_target")
         sender.patch.assert_not_called()
 
+    def test_initial_pin_requires_sole_active_version_and_preserves_endpoint(self):
+        sender, project, credential = self.route_clients(before="@latest", after="1")
+        project.agents.list_versions.return_value = [SimpleNamespace(version="1", status="active")]
+        result = change_route(ENDPOINT, request(), "@latest", "1", evidence("pin"), "pin",
+                              credential, client=sender, project=project)
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(sender.patch.call_args.kwargs["json"], {"agent_endpoint": {"version_selector": {
+            "version_selection_rules": [{"agent_version": "1", "traffic_percentage": 100,
+                                         "type": "FixedRatio"}]}}})
+        project.agents.list_versions.assert_called_once_with("sre", include_drafts=True)
+
+        sender, project, credential = self.route_clients(before="1")
+        result = change_route(ENDPOINT, request(), "@latest", "1", evidence("pin"), "pin",
+                              credential, client=sender, project=project)
+        self.assertEqual(result["status"], "already_target")
+        project.agents.list_versions.assert_not_called()
+        sender.patch.assert_not_called()
+
+    def test_initial_pin_refuses_ambiguous_latest(self):
+        for versions in ([], [SimpleNamespace(version="1", status="failed")],
+                         [SimpleNamespace(version="1", status="active"),
+                          SimpleNamespace(version="2", status="active")]):
+            sender, project, credential = self.route_clients(before="@latest")
+            project.agents.list_versions.return_value = versions
+            with self.assertRaisesRegex(ValueError, "exactly one Active"):
+                change_route(ENDPOINT, request(), "@latest", "1", evidence("pin"), "pin",
+                             credential, client=sender, project=project)
+            sender.patch.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "Pin requires @latest"):
+            validate_route_evidence(evidence("pin"), request(), "2", "1", "pin")
+
     def test_readback_catches_unexpected_endpoint_change(self):
         sender, project, credential = self.route_clients(after="1")
         with self.assertRaisesRegex(RuntimeError, "readback"):
@@ -120,7 +154,8 @@ class RouteTests(unittest.TestCase):
 
     def render(self, mode, release=None, publisher_image=RUNNER, review=None):
         values = {"agent": {"id": "sre", "image": IMAGE, "revision": REVISION},
-                  "release": {"mode": mode, "baseVersion": "1", "targetVersion": "2",
+                  "release": {"mode": mode, "baseVersion": "@latest" if mode == "pin" else "1",
+                              "targetVersion": "1" if mode == "pin" else "2",
                               "evidence": review if review is not None else evidence(mode)},
                   "publisher": {"image": publisher_image}}
         with tempfile.TemporaryDirectory() as directory:
@@ -144,6 +179,13 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(json.loads(docs["ConfigMap"]["data"]["evidence.json"]), evidence("rollback"))
         self.assertEqual(job["metadata"]["name"], next(doc["metadata"]["name"] for doc in
                          yaml.safe_load_all(self.render("rollback").stdout) if doc["kind"] == "Job"))
+
+        pinned = self.render("pin")
+        self.assertEqual(pinned.returncode, 0, pinned.stderr)
+        pin_docs = {doc["kind"]: doc for doc in yaml.safe_load_all(pinned.stdout)}
+        self.assertEqual(pin_docs["Job"]["spec"]["template"]["spec"]["containers"][0]["image"], RUNNER)
+        self.assertIn("pin", pin_docs["Job"]["spec"]["template"]["spec"]["containers"][0]["args"])
+        self.assertEqual(json.loads(pin_docs["ConfigMap"]["data"]["evidence.json"]), evidence("pin"))
 
         for mode in ("first", "candidate"):
             result = self.render(mode, publisher_image="")
@@ -172,6 +214,24 @@ class RouteTests(unittest.TestCase):
                 sys.executable, "-m", "portfolio_agent_factory", "promote",
                 "--agent", str(agent), "--image", IMAGE, "--revision", REVISION,
                 "--base-version", "1", "--target-version", "2", "--evidence", str(review),
+            ], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["status"], "validated_only")
+
+    def test_cli_validates_initial_pin_without_applying(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Path(directory) / "sre.yaml"
+            agent.write_text(yaml.safe_dump({
+                "schema_version": 1, "id": "sre", "model": "chat", "handler": "sample:run",
+                "eval_suite": "test", "reasoning_effort": "medium", "instructions": "Investigate",
+                "limits": {"model_requests": 3, "tool_calls": 0},
+            }))
+            review = Path(directory) / "evidence.json"
+            review.write_text(json.dumps(evidence("pin")))
+            result = subprocess.run([
+                sys.executable, "-m", "portfolio_agent_factory", "pin",
+                "--agent", str(agent), "--image", IMAGE, "--revision", REVISION,
+                "--base-version", "@latest", "--target-version", "1", "--evidence", str(review),
             ], text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["status"], "validated_only")

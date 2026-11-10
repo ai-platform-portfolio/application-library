@@ -18,6 +18,14 @@ from .publish import create_candidate_release, create_first_release
 _VERSION = re.compile(r"^[0-9]+$")
 
 
+def validate_route_versions(base_version: str, target_version: str, mode: str):
+    if mode == "pin":
+        if base_version != "@latest" or not _VERSION.fullmatch(target_version):
+            raise ValueError("Pin requires @latest as base and a concrete target release")
+    elif not _VERSION.fullmatch(base_version) or not _VERSION.fullmatch(target_version):
+        raise ValueError("Base and target must be concrete release numbers")
+
+
 def wait_active(client, agent_name: str, version: str, *, timeout_seconds: int = 600, interval_seconds: int = 5):
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -69,8 +77,7 @@ def require_pinned_route(project_endpoint: str, agent_name: str, expected_versio
 
 
 def validate_route_evidence(evidence: dict, request: dict, base_version: str, target_version: str, mode: str):
-    if not _VERSION.fullmatch(base_version) or not _VERSION.fullmatch(target_version):
-        raise ValueError("Base and target must be concrete release numbers")
+    validate_route_versions(base_version, target_version, mode)
     if not isinstance(evidence, dict) or any(evidence.get(key) != value for key, value in {
         "agent": request["agent_name"],
         "base_version": base_version,
@@ -83,6 +90,8 @@ def validate_route_evidence(evidence: dict, request: dict, base_version: str, ta
     if (not isinstance(review, dict) or review.get("status") != "approved" or
             not isinstance(review.get("url"), str) or not review["url"].startswith("https://")):
         raise ValueError("A reviewed HTTPS approval reference is required")
+    if mode == "pin":
+        return
     if mode == "promote":
         evaluation = evidence.get("evaluation")
         checks = evaluation.get("automated_checks") if isinstance(evaluation, dict) else None
@@ -96,7 +105,7 @@ def validate_route_evidence(evidence: dict, request: dict, base_version: str, ta
         if not isinstance(evidence.get("reason"), str) or not evidence["reason"].strip():
             raise ValueError("Rollback requires a reviewed reason")
     else:
-        raise ValueError("Route mode must be promote or rollback")
+        raise ValueError("Route mode must be pin, promote or rollback")
 
 
 def change_route(project_endpoint: str, request: dict, base_version: str, target_version: str,
@@ -104,8 +113,7 @@ def change_route(project_endpoint: str, request: dict, base_version: str, target
     """Move one fixed route after exact-version, metadata and review checks."""
     if not project_endpoint.startswith("https://") or "/api/projects/" not in project_endpoint:
         raise ValueError("A Foundry project HTTPS endpoint is required")
-    if not _VERSION.fullmatch(base_version) or not _VERSION.fullmatch(target_version):
-        raise ValueError("Base and target must be concrete release numbers")
+    validate_route_versions(base_version, target_version, mode)
     if request.get("draft"):
         raise ValueError("A route target must be a regular release")
     validate_route_evidence(evidence, request, base_version, target_version, mode)
@@ -134,6 +142,12 @@ def change_route(project_endpoint: str, request: dict, base_version: str, target
                 "to_version": target_version, "mode": mode, "status": "already_target"}
     if rules != expected(base_version):
         raise ValueError("Production route differs from the expected base version")
+    if mode == "pin":
+        # @latest is safe to pin only while exactly one hosted version exists.
+        versions = list(project.agents.list_versions(request["agent_name"], include_drafts=True))
+        if len(versions) != 1 or str(versions[0].version) != target_version or \
+                str(getattr(versions[0].status, "value", versions[0].status)).lower() != "active":
+            raise ValueError("Initial pin requires exactly one Active hosted version")
     if base_version == target_version:
         raise ValueError("Base and target are identical but route is not already pinned")
 
