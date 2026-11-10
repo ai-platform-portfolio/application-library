@@ -80,7 +80,7 @@ class HandoffTests(unittest.TestCase):
         raw, marker = artifact(RESULT | {"decision": "abstain"})
         with patch("portfolio_agent_factory.handoff.resolve_sha") as source:
             outcome = dispatch(INTENT, raw, marker,
-                               "diag-sre-incident", "read-token", api=api)
+                               "diag-sre-incident", "handoff-sre-incident", "read-token", api=api)
         self.assertEqual(outcome["status"], "abstained")
         source.assert_not_called()
         api.create.assert_not_called()
@@ -106,6 +106,12 @@ class HandoffTests(unittest.TestCase):
         client.get.return_value.json.return_value = {"spec": {"repositories": ["other-repo"]}}
         with self.assertRaisesRegex(ValueError, "Conflicting"):
             api.create(resource)
+        resource["metadata"]["ownerReferences"] = [{"apiVersion": "batch/v1", "kind": "Job",
+                                                     "name": "handoff", "uid": "owner"}]
+        client.get.return_value.json.return_value = {"metadata": {"ownerReferences": []},
+                                                      "spec": {"repositories": ["preview-environments"]}}
+        with self.assertRaisesRegex(ValueError, "owner"):
+            api.create(resource)
 
     def test_dispatcher_rejects_spoofed_diagnostic_pod(self):
         client = Mock()
@@ -128,6 +134,8 @@ class HandoffTests(unittest.TestCase):
     def test_dispatch_cleans_tokens_after_terminal_worker_and_keeps_job_logs(self):
         api = Mock()
         api.wait_job.return_value = True
+        api.handoff_owner.return_value = {"apiVersion": "batch/v1", "kind": "Job", "name": "handoff", "uid": "owner"}
+        api.reference.return_value = {"apiVersion": "batch/v1", "kind": "Job", "name": "fix", "uid": "worker"}
         raw, marker = artifact()
         with patch("portfolio_agent_factory.handoff.resolve_sha", return_value="c" * 40), \
              patch("portfolio_agent_factory.handoff.render_fix", return_value=[
@@ -135,10 +143,14 @@ class HandoffTests(unittest.TestCase):
                  {"kind": "ConfigMap", "metadata": {"name": "input"}},
                  {"kind": "Job", "metadata": {"name": "fix"}},
              ]):
-            outcome = dispatch(INTENT, raw, marker, "diag-sre-incident", "read-token", api=api)
+            outcome = dispatch(INTENT, raw, marker, "diag-sre-incident", "handoff-sre-incident", "read-token", api=api)
         self.assertTrue(outcome["published"])
         self.assertEqual([call.args[0]["kind"] for call in api.delete.call_args_list],
                          ["ConfigMap", "GithubAccessToken"])
+        created = [call.args[0] for call in api.create.call_args_list]
+        self.assertEqual([item["kind"] for item in created], ["GithubAccessToken", "Job", "ConfigMap"])
+        self.assertEqual(created[0]["metadata"]["ownerReferences"][0]["uid"], "owner")
+        self.assertEqual(created[-1]["metadata"]["ownerReferences"][0]["uid"], "worker")
 
     def test_alert_chart_passes_successful_pod_result_to_separate_job(self):
         values = {

@@ -152,11 +152,33 @@ class Kubernetes:
             existing = self.client.get(f"{path}/{quote(resource['metadata']['name'])}")
             existing.raise_for_status()
             old = existing.json()
+            expected_owner = resource.get("metadata", {}).get("ownerReferences", [])
+            if expected_owner and not all(
+                any(self._contains(actual, owner) for actual in old.get("metadata", {}).get("ownerReferences", []))
+                for owner in expected_owner
+            ):
+                raise ValueError(f"Conflicting {resource['kind']} owner already exists")
             for key in ("spec", "data"):
                 if key in resource and not self._contains(old.get(key), resource[key]):
                     raise ValueError(f"Conflicting {resource['kind']} already exists")
             return
         response.raise_for_status()
+
+    def reference(self, resource: dict) -> dict:
+        path = f"{self.path(resource)}/{quote(resource['metadata']['name'])}"
+        response = self.client.get(path)
+        response.raise_for_status()
+        uid = response.json().get("metadata", {}).get("uid")
+        if not isinstance(uid, str) or not uid:
+            raise ValueError("Kubernetes owner is missing its UID")
+        return {"apiVersion": resource["apiVersion"], "kind": resource["kind"],
+                "name": resource["metadata"]["name"], "uid": uid}
+
+    def handoff_owner(self, name: str) -> dict:
+        if not DNS.fullmatch(name):
+            raise ValueError("Handoff Job name is invalid")
+        return self.reference({"apiVersion": "batch/v1", "kind": "Job",
+                               "metadata": {"name": name, "namespace": "argocd"}})
 
     @classmethod
     def _contains(cls, actual, expected) -> bool:
@@ -230,7 +252,7 @@ class Kubernetes:
         raise TimeoutError("Fix Job did not finish before the handoff deadline")
 
 
-def dispatch(intent: dict, raw_result: str, marker: str, incident_id: str, read_token: str, *, api=None, github=None, helm="helm") -> dict:
+def dispatch(intent: dict, raw_result: str, marker: str, incident_id: str, handoff_job: str, read_token: str, *, api=None, github=None, helm="helm") -> dict:
     intent = checked_intent(intent)
     result = checked_result(raw_result, marker, intent)
     if result["decision"] == "abstain":
@@ -242,12 +264,19 @@ def dispatch(intent: dict, raw_result: str, marker: str, incident_id: str, read_
     sha = resolve_sha(intent["policy"]["repository"], intent["policy"]["base_ref"], read_token, client=github)
     resources = render_fix(intent, result, incident_id, sha, helm=helm)
     api = api or Kubernetes()
+    owner = api.handoff_owner(handoff_job)
+    job = next(resource for resource in resources if resource["kind"] == "Job")
+    input_map = next(resource for resource in resources if resource["kind"] == "ConfigMap")
+    tokens = [resource for resource in resources if resource["kind"] in {"GithubAccessToken", "ExternalSecret"}]
     created = []
     try:
-        for resource in resources:
+        for resource in [*tokens, job, input_map]:
+            if resource in tokens:
+                resource["metadata"]["ownerReferences"] = [owner]
+            if resource is input_map:
+                resource["metadata"]["ownerReferences"] = [api.reference(job)]
             api.create(resource)
             created.append(resource)
-        job = next(resource for resource in resources if resource["kind"] == "Job")
         succeeded = api.wait_job(job, time.monotonic() + 2100)
         if not succeeded:
             raise RuntimeError("Fix Job failed; inspect its retained Pod logs")
@@ -265,5 +294,6 @@ def main(intent_path: Path, marker: str, pod: str, incident_id: str):
     intent = checked_intent(json.loads(intent_path.read_text()))
     api = Kubernetes()
     output = dispatch(intent, api.read_log(pod, incident_id, intent), marker, incident_id,
+                      os.environ["HANDOFF_JOB_NAME"],
                       os.environ["GITHUB_READ_TOKEN"], api=api)
     print(json.dumps(output))

@@ -61,9 +61,11 @@ scope, validation commands or publication mode.
 
 The handoff watches the worker Job, removes temporary token resources and
 input ConfigMap after termination, and leaves worker Pod logs for the chart's
-one-hour Job TTL. A handoff that exhausts retries can leave temporary ESO
-resources; inspect and remove that incident's generated resources before a
-manual retry. Live fault-injection acceptance is still required. A draft PR
+one-hour Job TTL. Temporary token resources are also owned by the handoff
+Job in `argocd`; Kubernetes garbage collection removes them if the dispatcher
+dies before cleanup. The worker owns its input ConfigMap, so its TTL also
+cleans that resource after an interrupted handoff. Live fault-injection
+acceptance is still required. A draft PR
 requires human diff and CI review. This path does not establish network egress
 isolation for validation containers.
 
