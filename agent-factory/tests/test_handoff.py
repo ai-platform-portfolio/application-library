@@ -173,6 +173,8 @@ class HandoffTests(unittest.TestCase):
         sensor = next(item for item in docs if item["kind"] == "Sensor" and item["metadata"]["name"] == name + "-handoff")
         filters = sensor["spec"]["dependencies"][0]["filters"]["data"]
         self.assertIn("body.status.phase", {item["path"] for item in filters})
+        exit_code = next(item for item in filters if item["path"].endswith("terminated.exitCode"))
+        self.assertEqual((exit_code["type"], exit_code["value"]), ("number", ["0"]))
         job = sensor["spec"]["triggers"][0]["template"]["k8s"]["source"]["resource"]
         self.assertNotEqual(job["spec"]["template"]["spec"]["serviceAccountName"], "foundry-diagnostic-broker")
         self.assertEqual(job["spec"]["template"]["spec"]["containers"][0]["image"], IMAGE)

@@ -199,7 +199,7 @@ spec:
           - {path: type, type: string, value: ['^UPDATE$']}
           - {path: body.metadata.labels.agent-factory-diagnostic, type: string, value: [{{ printf "^%s$" $name | quote }}]}
           - {path: body.status.phase, type: string, value: ['^Succeeded$']}
-          - {path: body.status.containerStatuses.0.state.terminated.exitCode, type: number, value: ['^0$']}
+          - {path: body.status.containerStatuses.0.state.terminated.exitCode, type: number, value: ['0']}
           - {path: body.status.containerStatuses.0.state.terminated.message, type: string, value: ['^[{]']}
   triggers:
     - template:
