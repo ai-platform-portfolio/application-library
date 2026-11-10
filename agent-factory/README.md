@@ -64,7 +64,9 @@ Its chart creates a RoleBinding only in that namespace and removes it when the
 release is uninstalled. The Kubernetes token stays in AKS. Tool results are
 not persisted by this Job.
 
-The current registry reads Deployment and Pod state, recent target events,
+The current registry reads Deployment or Argo Rollout and Pod state, including bounded container
+image and HTTP readiness-probe fields while excluding environment values;
+recent target events,
 bounded Pod logs and fixed Mimir CPU/restart queries. It cannot run shell
 commands or accept model-generated Kubernetes paths or PromQL. GitOps owns the
 broker's service account, read-only RBAC and federated Foundry identity. This
