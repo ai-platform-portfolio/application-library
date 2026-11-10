@@ -7,6 +7,7 @@ agent:
 incident:
   path: ""
   namespace: ""
+  payload: {}
 
 broker:
   serviceAccountName: foundry-diagnostic-broker

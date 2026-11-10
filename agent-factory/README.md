@@ -59,10 +59,36 @@ AKS Job with a separate Foundry User identity. An agent declares tool names;
 the hosted handler returns one tool request per invocation. The broker executes
 only its fixed read-only registry, passes at most 24 KiB per result back as
 explicitly untrusted evidence, and stops at the manifest's request/tool limits.
-The Job receives one approved namespace and an image-bundled incident file.
-Its chart creates a RoleBinding only in that namespace and removes it when the
-release is uninstalled. The Kubernetes token stays in AKS. Tool results are
-not persisted by this Job.
+The Job receives one approved namespace and either an image-bundled incident
+file or a bounded runtime `incident.payload`. The latter creates a content-
+addressed ConfigMap mounted read-only into the Job. Use a distinct Helm release
+name for each incident identity so concurrent Jobs retain their own input;
+upgrading one release to a different incident can remove its old ConfigMap.
+The chart creates a RoleBinding
+only in the approved namespace and removes the Job, ConfigMap and RoleBinding
+when the release is uninstalled. The Kubernetes token stays in AKS. Tool
+results are not persisted by this Job.
+
+For a runtime incident, supply metadata only; Helm retains values in its
+release Secret and the chart stores the document in a temporary ConfigMap.
+The payload must contain a matching namespace, a workload DNS label and a
+summary; it is capped at 8 KiB. Fetch logs, events and metrics through the
+broker's read-only tools rather than putting them in the incident document.
+For example:
+
+```yaml
+incident:
+  namespace: preview-example-pr-12
+  payload:
+    namespace: preview-example-pr-12
+    workload: web
+    summary: Check the current preview workload health.
+```
+
+The existing `incident.path: incidents/<name>.json` remains available for
+recorded cases. Runtime input removes the image-rebuild dependency for a new
+incident; authenticated alert intake and automatic Job creation are separate
+capabilities that are not implemented by this chart change.
 
 The current registry reads Deployment or Argo Rollout and Pod state, including bounded container
 image and HTTP readiness-probe fields while excluding environment values;

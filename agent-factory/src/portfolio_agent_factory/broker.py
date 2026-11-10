@@ -15,6 +15,17 @@ from .manifest import load_agent
 from .release import create_pinned_session, smoke
 
 
+def load_incident(path: Path) -> dict:
+    with path.open("rb") as source:
+        payload = source.read(8193)
+    if len(payload) > 8192:
+        raise ValueError("Incident document exceeds the 8 KiB limit")
+    incident = json.loads(payload)
+    if not isinstance(incident, dict):
+        raise ValueError("Incident document must be an object")
+    return incident
+
+
 def run_broker(agent, incident: dict, project_endpoint: str, namespace: str, *, version=None, credential=None, executor=None, invoker=None, session_id=None) -> dict:
     """Keep the bounded tool loop in the broker; no Kubernetes token enters Foundry."""
     target(incident, namespace)
@@ -59,7 +70,7 @@ def run_broker(agent, incident: dict, project_endpoint: str, namespace: str, *, 
 
 def main(agent_path: Path, incident_path: Path, project_endpoint: str, namespace: str, version: str):
     agent = load_agent(agent_path)
-    incident = json.loads(incident_path.read_text())
+    incident = load_incident(incident_path)
     provider = TracerProvider(resource=Resource.create({"service.name": "foundry-diagnostic-broker"}))
     if os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"):
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
