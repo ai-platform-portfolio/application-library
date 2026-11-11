@@ -1,4 +1,0 @@
-apiVersion: v2
-name: foundry-agent-fix
-version: 0.1.0
-description: Isolated coding, validation and draft-PR publication for Foundry agents
