@@ -9,6 +9,7 @@ and environment-specific resources stay in their owning repositories.
 
 | Package | Purpose | Distribution |
 | --- | --- | --- |
+| [Agent runtime](agent-runtime) | Native Foundry durable context, reviewed knowledge and bounded coding capabilities | Versioned Python wheel on GitHub Releases |
 | [Agent observability](observability) | Optional bounded OTLP tracing and collector-side Langfuse forwarding | Versioned Python wheel on GitHub Releases |
 
 Consumers install a released wheel pinned by URL/SHA256 in their existing
@@ -27,5 +28,6 @@ without forcing tags or overwriting releases; no custom publisher/recovery scrip
 The Foundry agent factory has been removed from this portfolio. Its historical
 source is preserved in the private
 [sre-agent-foundry/application-library](https://github.com/sre-agent-foundry/application-library)
-repository. The old SRE runtime, publisher and Helm charts remain retired;
-the observability package is independent reusable Python code.
+repository. The old AKS runtime topology, publisher jobs and Helm charts remain retired.
+The new runtime package restores reusable business capabilities for Foundry
+hosting; its tests and README distinguish source implementation from live delivery.
