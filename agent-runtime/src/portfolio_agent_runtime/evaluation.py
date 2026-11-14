@@ -32,5 +32,3 @@ def score(case, result, config):
             'status': 'human_review_required' if all(checks.values()) else 'failed',
             'human_rubric': case['rubric'].get('checks', case['rubric'].get('criteria', [])),
             'hard_failures': case['rubric'].get('hard_failures', []), 'result': result}
-
-
