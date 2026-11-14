@@ -22,4 +22,3 @@ PR/main runs only build and test. To publish, manually run **Python packages** o
 main with `package=observability` and `publish=true`. Release tags use the directory
 and wheel version, such as `observability-v0.1.0`. Native Git/GitHub CLI publish
 without forcing tags or overwriting releases; no custom publisher/recovery script.
-
