@@ -9,7 +9,7 @@ and environment-specific resources stay in their owning repositories.
 
 | Package | Purpose | Distribution |
 | --- | --- | --- |
-| [Agent observability](agents/observability) | Optional bounded OTLP tracing and collector-side Langfuse forwarding | Versioned Python wheel on GitHub Releases |
+| [Agent observability](observability) | Optional bounded OTLP tracing and collector-side Langfuse forwarding | Versioned Python wheel on GitHub Releases |
 
 Consumers install a released wheel pinned by URL/SHA256 in their existing
 requirements.txt. The package workflow builds/tests on PRs and main; publication

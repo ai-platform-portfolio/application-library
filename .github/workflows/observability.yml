@@ -2,10 +2,10 @@ name: Agent observability package
 
 on:
   pull_request:
-    paths: ['agents/observability/**', '.github/workflows/observability.yml']
+    paths: ['observability/**', '.github/workflows/observability.yml']
   push:
     branches: [main]
-    paths: ['agents/observability/**', '.github/workflows/observability.yml']
+    paths: ['observability/**', '.github/workflows/observability.yml']
   workflow_dispatch:
     inputs:
       publish:
@@ -35,8 +35,8 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/observability-venv"
           "$RUNNER_TEMP/observability-venv/bin/pip" install --only-binary=:all: \
-            'opentelemetry-sdk==1.45.2' 'opentelemetry-exporter-otlp-proto-http==1.45.2' ./agents/observability
-          "$RUNNER_TEMP/observability-venv/bin/python" -m unittest discover -s agents/observability/tests -v
+            'opentelemetry-sdk==1.45.2' 'opentelemetry-exporter-otlp-proto-http==1.45.2' ./observability
+          "$RUNNER_TEMP/observability-venv/bin/python" -m unittest discover -s observability/tests -v
 
   package:
     needs: tests
@@ -49,7 +49,7 @@ jobs:
 
     uses: ai-platform-portfolio/ops-shared/.github/workflows/python-package.yml@c1b488e87d20a9024106dd657eb64bfca479ab1f
     with:
-      package-directory: agents/observability
+      package-directory: observability
       revision: ${{ github.event.pull_request.head.sha || github.sha }}
       release-prefix: agent-observability-v
       publish: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.publish }}
