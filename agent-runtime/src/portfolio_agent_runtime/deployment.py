@@ -40,6 +40,10 @@ def configure(path):
         record.write_text(json.dumps(manifest, indent=2))
     values = {'MEMORY_STORE_NAME': memory_name,
               'KNOWLEDGE_MANIFEST_JSON': json.dumps(manifest, separators=(',', ':')),
+              'MODEL_BASE_URL': os.getenv('MODEL_BASE_URL') or '',
+              'MODEL_TOKEN_SCOPE': os.getenv('MODEL_TOKEN_SCOPE') or 'https://ai.azure.com/.default',
+              'METRICS_URL': os.getenv('METRICS_URL') or '',
+              'METRICS_TOKEN_SCOPE': os.getenv('METRICS_TOKEN_SCOPE') or '',
               'AGENT_DIAGNOSTICS_BACKEND': os.getenv('AGENT_DIAGNOSTICS_BACKEND') or 'provided'}
     keys = ('KUBE_API_URL', 'KUBE_CA_PEM', 'KUBE_ALLOWED_NAMESPACE', 'KUBE_ALLOWED_WORKLOAD')
     if values['AGENT_DIAGNOSTICS_BACKEND'] == 'kubernetes':
