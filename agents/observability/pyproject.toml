@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools==84.2.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "portfolio-agent-observability"
+version = "0.1.0"
+description = "Optional bounded OpenTelemetry trace export for portfolio agents"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "opentelemetry-api>=1.45.2,<2",
+  "opentelemetry-sdk>=1.45.2,<2",
+  "opentelemetry-exporter-otlp-proto-http>=1.45.2,<2",
+]
+
+[project.urls]
+Repository = "https://github.com/ai-platform-portfolio/application-library"
+
+[tool.setuptools.packages.find]
+where = ["src"]
