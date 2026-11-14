@@ -47,13 +47,14 @@ python3 -m pip install dist/*.whl
 python3 -m unittest discover -s tests -v
 ```
 
-The repository's thin workflow calls ops-shared's scalar Python-package workflow.
+The repository-wide packages.yml calls ops-shared's scalar Python-package workflow.
 PR/main builds test the package without publishing. After merging, manually run
-the workflow on main with `publish=true`; it derives the release tag from the
-wheel version (`agent-observability-v0.1.0`). The version lives only in pyproject.toml.
-Publication uses GitHub Releases, not GHCR or a new Python registry. Source commit,
-wheel SHA256 and package metadata accompany the wheel; retries cannot overwrite
-an existing different release. Consumer adoption must use the actual released
+the workflow on main with `package=observability` and `publish=true`; it derives the release tag from the
+wheel version (`observability-v0.1.0`). The version lives only in pyproject.toml.
+Publication uses GitHub Releases, not GHCR or a new Python registry. The source
+commit and wheel SHA256 accompany the release. Native Git/GitHub CLI refuse
+conflicting tags or existing releases; no automatic overwrite/recovery is added.
+Consumer adoption must use the actual released
 wheel URL and SHA256 in the existing requirements.txt; never commit a placeholder.
 
 Keep complete pinned/hashed dependencies in the consuming application's existing
