@@ -1,8 +1,8 @@
 """Bounded code proposal, validation and draft-PR publication.
 
-The four commands run in separate containers. Only the fetcher sees a read
-token, only the proposer sees a Foundry identity, and only the publisher sees
-the repository-scoped write token. The publisher never executes repository code.
+Model proposal runs in Foundry. Untrusted validation runs in a Docker sandbox
+without credentials. Publication credentials are minted only after validation;
+trusted fetch/publication code never executes target repository code.
 """
 
 import ast

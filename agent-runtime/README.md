@@ -15,7 +15,7 @@ create infrastructure or run an AKS worker.
 | `hosting.py` | Composes explicit memory commands and the investigator without mixing history with current evidence. |
 | `handoff.py` | CLI bindings for isolated CI fetch, validation and draft publication. |
 | `deployment.py` | Native azd hook for reviewed knowledge, memory definition and explicit optional diagnostic inputs. |
-| `coding.py` | Restored archive's exact-base fetch, bounded proposal, validation binding and draft-only GitHub publication. Each phase needs an isolated execution boundary supplied by its caller. |
+| `coding.py` | Restored archive's exact-base fetch, bounded proposal, validation binding and draft-only GitHub publication. The caller supplies the appropriate execution and credential boundaries. |
 
 ## Durable context
 

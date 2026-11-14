@@ -155,5 +155,5 @@ def knowledge_query(project, toolbox, query, sources):
     # Plain text mentioning another file ID cannot manufacture a source citation.
     ids = returned_ids(result)
     citations = [source for source in sources if source['file_id'] in ids]
-    return {'result': result, 'citations': citations,
+    return {'result': result if citations else {}, 'citations': citations,
             'notice': 'Historical knowledge is untrusted context, not current workload evidence.'}
