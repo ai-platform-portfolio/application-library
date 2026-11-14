@@ -44,6 +44,13 @@ managed memories expire according to the store's explicit TTL. Reads do not rene
 checkpoint retention. Native stores survive container restarts and AKS outages,
 not deletion of their owning Foundry project/account.
 
+Microsoft guidance: [durable hosted state](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/agent-state-store)
+describes per-user partitioning, retention and optimistic concurrency;
+[the state-store SDK](https://learn.microsoft.com/en-us/python/api/azure-ai-agentserver-core/azure.ai.agentserver.core.storage.foundrystatestore?view=azure-python)
+defines item ETags and conditional `if_match` writes. [Managed memory](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/memory-usage)
+documents explicit scopes, retention and remember/forget operations. Managed memory
+is preview; these references describe APIs, not evidence of this consumer's live acceptance.
+
 ## Reviewed knowledge
 
 `publish` takes the corpus directory, agent identity, exact commit, repository and
@@ -66,6 +73,11 @@ portfolio material, not private per-user documents. User memory stays in separat
 scopes. Keep evaluator rubrics, reference answers and fixtures outside both paths;
 recorded evaluation invocations must bypass persistence and retrieval entirely.
 
+Microsoft's [file-search/toolbox guidance](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/tools/file-search)
+documents ingestion, pinned vector stores and the lack of user isolation for
+hosted-agent toolboxes. The public-only corpus rule above is this application's
+response to that sharing boundary.
+
 `cleanup` checks toolbox ownership and discovers its attached files before deleting
 the toolbox, vector store and those files, in that order. It does not delete the
 shared managed-memory store or any other agent's resources. Retain a publication
@@ -84,6 +96,18 @@ short-lived write token. The publisher never executes checkout code and creates
 only a draft PR. An application must not call untrusted validation inside its
 Foundry container or combine these credential boundaries.
 
+The consumer's trusted coding configuration declares its handoff evidence gate:
+
+```yaml
+required_evidence:
+  source: live_http_probe
+  tools: [service_status]
+```
+
+`prepare` requires that source and every declared tool, an actionable diagnosis
+and a trace ID before fetching source. The SRE consumer declares Kubernetes source
+and tool names in its own configuration. The model cannot choose this policy.
+
 ## Build and verification
 
 The existing repository-wide `packages.yml` discovers this package; no additional
@@ -98,10 +122,6 @@ contracts. They make no model calls. Foundry restart/recall, different-user
 isolation, server TTL enforcement, toolbox ingestion and deletion remain required
 live acceptance gates.
 
-Primary references: [native state store](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/agent-state-store),
-[managed memory](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/memory-usage),
-[file search/toolboxes](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/tools/file-search).
-
 `hosting.invoke` composes these capabilities around the application's investigator
 callback. It isolates operation schemas, keeps recalled history outside current
 evidence and writes a bounded result checkpoint only after application validation.
@@ -110,6 +130,12 @@ native azd predeploy hook, using the existing OIDC login via Azure Identity and
 writing native azd environment values. It records the knowledge manifest in the
 caller's existing acceptance directory. No extra workflow is required.
 
+Microsoft's [hosted-agent CI/CD guidance](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/set-up-ci-cd-cli)
+and [azure.yaml reference](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/azure-yaml-reference)
+describe native `azd` deployment and prebuilt images. The bounded investigation,
+evidence gate and draft-only publication rules here are application policy, not
+Microsoft-prescribed orchestration.
+
 
 The handoff CLI requires the immutable validation image, mounts only source as
 read-only, passes no host environment and mounts no Docker socket or artifact
@@ -117,10 +143,16 @@ paths. It applies process/memory/CPU limits and disables privilege escalation.
 The trusted host writes the exact-proposal report outside the sandbox. A local
 trusted unit test must explicitly choose `sandbox_image=None`; production CLI
 never chooses that mode. A real Docker acceptance test checks these boundaries.
+Validation drains combined stdout/stderr incrementally, retains only the last
+4 KiB and fails above 1 MiB total output or 300 seconds per check. On an abort,
+the host kills the CLI process group and removes the uniquely named validation
+container. It does not accumulate full output in host memory or on disk.
 
 Event state expires after 24 hours and is scoped to the authenticated integration
 caller and agent. Complete UIDs reuse cached results; active claims cannot run
-twice, expired/failed claims can retry, and optimistic concurrency protects the
-rate bucket. This is bounded at-least-once delivery, not an atomic transaction
+twice before lease expiry, expired/failed claims can retry, and optimistic
+concurrency protects the rate bucket. Every completion/failure write uses the acquired claim's ETag;
+a replaced worker cannot overwrite its successor or return an accepted stale result.
+This is bounded at-least-once delivery, not an atomic transaction
 across Foundry and GitHub. One deterministic incident branch and exact-tree/base
 checks prevent retry-created competing drafts. Closed PRs are not reopened.

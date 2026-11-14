@@ -12,12 +12,18 @@ from . import coding
 
 def prepare(config_path, investigation_path, output, incident_id):
     configuration = yaml.safe_load(Path(config_path).read_text())
+    required = configuration['required_evidence']
+    if (not isinstance(required, dict) or set(required) != {'source', 'tools'}
+            or not isinstance(required['source'], str) or not required['source']
+            or not isinstance(required['tools'], list) or not required['tools']
+            or any(not isinstance(tool, str) or not tool for tool in required['tools'])):
+        raise ValueError('Coding policy needs an explicit evidence source and required tools')
     result = coding.read_json(Path(investigation_path))
     if (result.get('diagnosis', {}).get('decision') != 'actionable'
-            or result.get('evidence_source') != 'live_kubernetes'
-            or not {'workload_state', 'recent_events'} <= set(result.get('tool_calls', []))
+            or result.get('evidence_source') != required['source']
+            or not set(required['tools']) <= set(result.get('tool_calls', []))
             or not re.fullmatch(r'[a-f0-9]{32}', result.get('trace_id') or '')):
-        raise ValueError('Coding requires an actionable, traced live investigation')
+        raise ValueError('Coding requires an actionable, traced investigation with the declared evidence')
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     policy = {key: configuration[key] for key in ('repository', 'base_ref', 'editable_paths', 'checks', 'instructions')}

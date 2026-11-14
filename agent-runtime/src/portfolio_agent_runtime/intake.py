@@ -1,5 +1,5 @@
 """Native durable event UID deduplication, leases and a bounded intake rate."""
-import asyncio
+from contextlib import suppress
 import hashlib
 import os
 import time
@@ -27,7 +27,7 @@ async def investigate_event(payload, investigate, *, agent, namespace, workload)
         now = time.time()
         claim = {'status': 'running', 'lease_until': now + 180}
         try:
-            await store.create_item(key, claim)
+            owned = await store.create_item(key, claim)
         except FoundryStorageConflictError:
             item = await store.get_item(key)
             if item.value['status'] == 'complete':
@@ -35,7 +35,7 @@ async def investigate_event(payload, investigate, *, agent, namespace, workload)
             if item.value['status'] == 'running' and item.value['lease_until'] > now:
                 return {'status': 'in_progress', 'duplicate': True}
             try:
-                await store.set_item(key, claim, if_match=item.etag)
+                owned = await store.set_item(key, claim, if_match=item.etag)
             except FoundryStoragePreconditionError:
                 return {'status': 'in_progress', 'duplicate': True}
         try:
@@ -57,7 +57,7 @@ async def investigate_event(payload, investigate, *, agent, namespace, workload)
                     except FoundryStoragePreconditionError:
                         continue
             if not allowed:
-                await store.set_item(key, {'status': 'failed', 'lease_until': 0})
+                await store.set_item(key, {'status': 'failed', 'lease_until': 0}, if_match=owned.etag)
                 return {'status': 'rate_limited', 'retry_after_seconds': 60}
             # Event messages never enter the model. Only approved target metadata
             # and a fixed instruction are passed to the existing live collectors.
@@ -66,10 +66,14 @@ async def investigate_event(payload, investigate, *, agent, namespace, workload)
                 'do not assume an ongoing fault or recovery from the event alone.'}
             result = await investigate({'incident': incident})
             result['delivery_id'] = delivery_id
-            await store.set_item(key, {'status': 'complete', 'result': bounded({key: value for key, value in result.items() if key != 'context'}, 16384)})
+            await store.set_item(key, {'status': 'complete', 'result': bounded({key: value for key, value in result.items() if key != 'context'}, 16384)},
+                                 if_match=owned.etag)
             return result
         except BaseException:
-            await store.set_item(key, {'status': 'failed', 'lease_until': 0})
+            # A replacement claimant owns a new ETag. Neither a late result nor
+            # failure cleanup may overwrite it; preserve the original exception.
+            with suppress(FoundryStoragePreconditionError):
+                await store.set_item(key, {'status': 'failed', 'lease_until': 0}, if_match=owned.etag)
             raise
     finally:
         await store.aclose()

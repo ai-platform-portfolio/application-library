@@ -11,11 +11,14 @@ import io
 import json
 import os
 import re
+import selectors
+import signal
 import subprocess
 import tarfile
 import tempfile
 import time
 from pathlib import Path, PurePosixPath
+from uuid import uuid4
 
 import httpx
 import yaml
@@ -27,6 +30,7 @@ ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MAX_FILES = 4
 MAX_FILE_BYTES = 32768
 MAX_ARCHIVE_BYTES = 20 * 1024 * 1024
+MAX_CHECK_OUTPUT_BYTES = 1024 * 1024
 
 
 def read_json(path: Path, maximum=131072):
@@ -292,6 +296,55 @@ def propose(policy: dict, root: Path, diagnosis: dict, client, model: str):
     raise RuntimeError("Model read budget exhausted")
 
 
+def _run_check(command, root, container=None, timeout=300):
+    """Drain both streams within a byte/time budget; retain only a 4 KiB tail."""
+    tail = b''
+    total = 0
+    zero_tests = False
+    failure = None
+    deadline = time.monotonic() + timeout
+    with subprocess.Popen(command, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          start_new_session=True,
+                          env={"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+                               "HOME": "/tmp", "PYTHONDONTWRITEBYTECODE": "1"}) as process:
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not selector.select(remaining):
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    chunk = os.read(process.stdout.fileno(), 65536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    zero_tests |= b'Ran 0 tests' in tail + chunk
+                    tail = (tail + chunk)[-4096:]
+                    if total > MAX_CHECK_OUTPUT_BYTES:
+                        failure = 'Validation output exceeds 1 MiB'
+                        break
+            if failure is None:
+                process.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            failure = 'Validation time budget exhausted'
+        finally:
+            # Kill the CLI process group and the named container separately:
+            # terminating docker's client alone does not terminate its container.
+            if process.poll() is None or failure is not None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                if container is not None:
+                    subprocess.run(['docker', 'rm', '--force', container], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, timeout=30, check=False)
+                process.wait()
+    output = tail.decode('utf-8', errors='replace')
+    if failure:
+        return 1, (output + '\n' + failure)[-4096:]
+    return (1 if zero_tests and 'unittest' in command else process.returncode), output
+
+
 def validate(policy: dict, root: Path, proposal: dict, *, sandbox_image):
     changes = validate_proposal(proposal, policy, root)
     for item in changes:
@@ -307,24 +360,20 @@ def validate(policy: dict, root: Path, proposal: dict, *, sandbox_image):
     checks = []
     for argv in policy["checks"]:
         command = argv
+        container = None
         if sandbox_image is not None:
             if not re.fullmatch(r'(?:[a-z0-9.-]+/[a-z0-9._/-]+@)?sha256:[a-f0-9]{64}', sandbox_image):
                 raise ValueError('Validation sandbox requires an immutable image digest')
-            command = ['docker', 'run', '--rm', '--network', 'none', '--read-only',
+            container = 'agent-validation-' + uuid4().hex
+            command = ['docker', 'run', '--rm', '--name', container, '--network', 'none', '--read-only',
                        '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
                        '--pids-limit', '128', '--memory', '512m', '--cpus', '1',
                        '--user', '10001:10001', '--tmpfs', '/tmp:rw,nosuid,nodev,noexec,size=16m',
                        '--mount', f'type=bind,source={root.resolve()},target=/workspace,readonly',
                        '--workdir', '/workspace', '--env', 'PYTHONDONTWRITEBYTECODE=1',
                        sandbox_image, *argv]
-        result = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=300,
-                                env={"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-                                     "HOME": "/tmp", "PYTHONDONTWRITEBYTECODE": "1"})
-        output = result.stdout + result.stderr
-        code = result.returncode
-        if "unittest" in argv and "Ran 0 tests" in output:
-            code = 1
-        checks.append({"argv": argv, "exit_code": code, "output_tail": output[-4096:]})
+        code, output = _run_check(command, root, container)
+        checks.append({"argv": argv, "exit_code": code, "output_tail": output})
         if code:
             break
     return {"schema_version": 1, "sandbox_image": sandbox_image, "proposal_sha256": hashlib.sha256(
