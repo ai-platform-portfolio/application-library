@@ -2,13 +2,13 @@
 import asyncio
 from contextlib import asynccontextmanager
 import json
+import hashlib
 import os
 import re
 from urllib.parse import urlsplit
-from uuid import uuid4
 
 from azure.ai.agentserver.core import get_request_context
-from azure.ai.agentserver.core.storage import FoundryStateStore, FoundryStorageConflictError
+from azure.ai.agentserver.core.storage import FoundryStateStore
 from azure.ai.projects.models import MemorySearchOptions
 
 
@@ -39,8 +39,8 @@ def identifier(value):
 async def user_context(agent, project, memory_store, retention_days=30):
     """Use only the Foundry-authenticated request context, never a delegated body/header.
 
-    Native user isolation protects items. An opaque per-user handle provides the
-    separate managed-memory partition; simultaneous first requests create it once.
+    Native user isolation protects items. A stable hash of trusted native identity
+    provides the separate managed-memory partition across agent versions.
     The SDK's local disk fallback is deliberately unavailable in this path.
     """
     ctx = get_request_context()
@@ -50,23 +50,16 @@ async def user_context(agent, project, memory_store, retention_days=30):
         raise ValueError('Retention must be 1-30 days')
     ttl = retention_days * 86400
     store = await FoundryStateStore.get_or_create(
-        f'{identifier(agent)}/users-v1', user_isolation=True, item_ttl_seconds=ttl)
+        f'{identifier(agent)}/users-v1', user_isolation=True, item_ttl_seconds=ttl, connection_timeout=5, read_timeout=15, retry_total=0)
     try:
         properties = await store.get()
         if properties.user_isolation is not True or properties.item_ttl_seconds != ttl:
             raise ValueError('Existing state store isolation/retention differs; review migration')
-        item = await store.get_item('memory-scope')
-        if item is None:
-            try:
-                await store.create_item('memory-scope', {'scope': uuid4().hex})
-            except FoundryStorageConflictError:
-                pass
-            item = await store.get_item('memory-scope')
-        if item is None:
-            raise RuntimeError('Memory partition could not be resolved')
-        # Memory scopes are never supplied by callers.
-        yield Context(store, project.beta.memory_stores, memory_store,
-                      identifier(agent) + ':' + identifier(item.value['scope']))
+        # Foundry supplies a global cross-agent user identity. Hash it with the
+        # stable agent name: no caller-selected scope or extra mapping resource,
+        # and memory identity does not change when a new version is deployed.
+        scope = hashlib.sha256(f'{agent}\0{ctx.user_id}'.encode()).hexdigest()
+        yield Context(store, project.beta.memory_stores, memory_store, f'{agent}:{scope}')
     finally:
         await store.aclose()
 
@@ -94,12 +87,11 @@ class Context:
         if (not isinstance(content, str) or not 20 <= len(content) <= 2048
                 or not isinstance(review, dict) or set(review) != {'approved', 'url'}
                 or review['approved'] is not True or not url or url.scheme != 'https'
-                or not url.hostname or url.username is not None or url.query or url.fragment):
+                or not url.hostname or url.username is not None or url.query):
             raise ValueError('Remember requires bounded content and explicit review attribution')
         record = json.dumps({'content': content, 'review': review['url']}, sort_keys=True)
         item = await asyncio.to_thread(self.memories.create_memory, self.memory_store,
                                        scope=self.scope, content=record, kind='procedural')
-        await self.state.set_item('memory-scope', {'scope': self.scope.split(':', 1)[1]})
         return {'id': item.memory_id, 'review': review['url']}
 
     async def recall(self, query):
@@ -112,11 +104,15 @@ class Context:
                          'updated_at': hit.memory_item.updated_at.isoformat()}
                         for hit in result.memories])
 
-    async def forget(self):
-        # Delete managed memories before the only handle to their scope.
-        await asyncio.to_thread(self.memories.delete_scope, self.memory_store, scope=self.scope)
-        # Keep the opaque handle: any in-flight writes remain in the same deletable scope.
-        # This operation deletes memory, not independently retained investigation checkpoints.
+    async def forget(self, memory_id=None):
+        if memory_id is not None:
+            identifier(memory_id)
+            item = await asyncio.to_thread(self.memories.get_memory, self.memory_store, memory_id)
+            if item.scope != self.scope:
+                raise ValueError('Memory does not belong to this authenticated caller')
+            await asyncio.to_thread(self.memories.delete_memory, self.memory_store, memory_id)
+        else:
+            await asyncio.to_thread(self.memories.delete_scope, self.memory_store, scope=self.scope)
         return {'forgotten': True}
 
     async def forget_investigation(self, investigation_id):

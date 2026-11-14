@@ -1,6 +1,7 @@
 """Safety and publication contracts for the separate fix worker phases."""
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,6 +39,11 @@ def proposal():
     }
 
 
+class FakeCall(SimpleNamespace):
+    def model_dump(self, **kwargs):
+        return vars(self)
+
+
 class FakeResponses:
     def __init__(self):
         self.calls = 0
@@ -47,7 +53,7 @@ class FakeResponses:
         if self.calls > 1:
             self.assert_tool_result(kwargs["input"])
         if self.calls <= 2:
-            return SimpleNamespace(status="completed", output=[SimpleNamespace(
+            return SimpleNamespace(status="completed", output=[FakeCall(
                 type="function_call", name="read_file", call_id=f"call-{self.calls}",
                 arguments='{"path":"deploy/values.json"}')])
         answer = {key: proposal()[key] for key in ("root_cause", "rationale", "changes")}
@@ -85,7 +91,7 @@ class FixTests(unittest.TestCase):
         result = propose(policy(), self.root, {"answer": "Observed readiness 404", "trace_id": "t"},
                          SimpleNamespace(responses=FakeResponses()), "chat")
         self.assertEqual(result, proposal())
-        report = validate(policy(), self.root, result)
+        report = validate(policy(), self.root, result, sandbox_image=None)
         self.assertTrue(report["passed"])
         self.assertEqual(json.loads((self.root / "deploy/values.json").read_text())["readinessPath"], "/api/healthz")
         changed = proposal()
@@ -93,8 +99,34 @@ class FixTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             publish(policy(), self.root, changed, report, "test")
 
+    @unittest.skipUnless(os.getenv('VALIDATION_SANDBOX_IMAGE'), 'Docker sandbox acceptance is opt-in')
+    def test_real_validation_container_has_no_credentials_network_or_host_write_access(self):
+        self.root.chmod(0o755)
+        (self.root / 'tests').mkdir()
+        (self.root / 'tests/test_readiness_contract.py').write_text("""
+import os
+from pathlib import Path
+import socket
+import unittest
+
+class BoundaryTests(unittest.TestCase):
+    def test_boundaries(self):
+        self.assertEqual(os.getuid(), 10001)
+        self.assertFalse(any(k.startswith(('AZURE_', 'GITHUB_', 'ACTIONS_')) for k in os.environ))
+        self.assertFalse(Path('/var/run/docker.sock').exists())
+        with self.assertRaises(OSError):
+            Path('/workspace/injected').write_text('no')
+        with self.assertRaises(OSError):
+            socket.create_connection(('1.1.1.1', 443), timeout=0.2)
+""")
+        configured = policy()
+        configured['checks'] = [['python', '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_readiness_contract.py']]
+        report = validate(configured, self.root, proposal(), sandbox_image=os.environ['VALIDATION_SANDBOX_IMAGE'])
+        self.assertTrue(report['passed'], report)
+        self.assertFalse((self.root / 'injected').exists())
+
     def test_publisher_creates_only_draft_pr_from_exact_base(self):
-        report = validate(policy(), self.root, proposal())
+        report = validate(policy(), self.root, proposal(), sandbox_image=None)
         seen = []
 
         def handle(request):
@@ -124,7 +156,7 @@ class FixTests(unittest.TestCase):
         pr = next(data for method, path, data in seen if method == "POST" and path.endswith("/pulls"))
         self.assertIs(pr["draft"], True)
         self.assertEqual(pr["base"], "fault/readiness")
-        self.assertTrue(pr["head"].startswith("agent/ai-204-"))
+        self.assertEqual(pr["head"], "agent/ai-204")
 
 
 if __name__ == "__main__":

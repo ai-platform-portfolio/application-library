@@ -9,6 +9,10 @@ create infrastructure or run an AKS worker.
 | --- | --- |
 | `context.py` | Native per-user state, explicit reviewed memory writes, bounded recall and forget; native file-search toolbox queries. |
 | `knowledge.py` | Reviewed Markdown ingestion, source hashes and commit links, managed-memory definition, revision-specific toolbox publication and ordered cleanup. |
+| `intake.py` | Native per-caller Event UID deduplication, retry leases and a two-per-minute bound; fixed incident text. |
+| `hosting.py` | Composes explicit memory commands and the investigator without mixing history with current evidence. |
+| `handoff.py` | CLI bindings for isolated CI fetch, validation and draft publication. |
+| `deployment.py` | Native azd hook for reviewed knowledge, memory definition and explicit optional diagnostic inputs. |
 | `coding.py` | Restored archive's exact-base fetch, bounded proposal, validation binding and draft-only GitHub publication. Each phase needs an isolated execution boundary supplied by its caller. |
 
 ## Durable context
@@ -17,8 +21,9 @@ The hosted server opens `user_context(agent, project, memory_store,
 retention_days=30)` inside the authenticated invocation. It requires Foundry's
 hosting environment and native call/user context. It never accepts user identity,
 memory scope or a delegated identity from request JSON. The state store enables
-native user isolation and verifies existing isolation/TTL before use. A random,
-atomically created handle maps that user's state to a managed-memory scope.
+native user isolation and verifies existing isolation/TTL before use. A stable hash of the agent name and Foundry-authenticated user identity supplies
+the managed-memory scope without another mapping resource. It stays stable across
+agent versions; callers cannot supply another scope.
 
 `checkpoint` / `resume` retain bounded investigation state, not arbitrary logs,
 credentials or hidden reasoning. `remember` is an explicit authenticated-owner
@@ -71,8 +76,8 @@ transaction.
 The restored coding module is adapted from
 [sre-agent-foundry](https://github.com/sre-agent-foundry/application-library/tree/main/agent-factory).
 It supplies functions, not worker infrastructure. Run fetching with a read token,
-proposal generation in Foundry without GitHub write credentials, validation in an
-isolated runner without credentials, and publication with a repository-scoped,
+proposal generation in Foundry without GitHub write credentials, validation in a
+network-disabled, non-root Docker sandbox without credentials, and publication with a repository-scoped,
 short-lived write token. The publisher never executes checkout code and creates
 only a draft PR. An application must not call untrusted validation inside its
 Foundry container or combine these credential boundaries.
@@ -102,3 +107,18 @@ The catalog binds this once in its Foundry protocol adapter. `deployment.py` is 
 native azd predeploy hook, using the existing OIDC login via Azure Identity and
 writing native azd environment values. It records the knowledge manifest in the
 caller's existing acceptance directory. No extra workflow is required.
+
+
+The handoff CLI requires the immutable validation image, mounts only source as
+read-only, passes no host environment and mounts no Docker socket or artifact
+paths. It applies process/memory/CPU limits and disables privilege escalation.
+The trusted host writes the exact-proposal report outside the sandbox. A local
+trusted unit test must explicitly choose `sandbox_image=None`; production CLI
+never chooses that mode. A real Docker acceptance test checks these boundaries.
+
+Event state expires after 24 hours and is scoped to the authenticated integration
+caller and agent. Complete UIDs reuse cached results; active claims cannot run
+twice, expired/failed claims can retry, and optimistic concurrency protects the
+rate bucket. This is bounded at-least-once delivery, not an atomic transaction
+across Foundry and GitHub. One deterministic incident branch and exact-tree/base
+checks prevent retry-created competing drafts. Closed PRs are not reopened.

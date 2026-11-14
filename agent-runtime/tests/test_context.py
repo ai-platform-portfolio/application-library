@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
 import json
+import hashlib
 import os
 from pathlib import Path
 import tempfile
@@ -30,8 +31,9 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
             try:
                 with patch.dict(os.environ, {'FOUNDRY_HOSTING_ENVIRONMENT': 'test'}):
                     async with user_context('demo', Mock(), 'memory') as context:
-                        self.assertEqual(context.scope, 'demo:opaque-user-handle')
-                    factory.assert_awaited_once_with('demo/users-v1', user_isolation=True, item_ttl_seconds=2592000)
+                        self.assertEqual(context.scope, 'demo:' + hashlib.sha256(b'demo\0trusted-user').hexdigest())
+                    factory.assert_awaited_once_with('demo/users-v1', user_isolation=True, item_ttl_seconds=2592000,
+                                                    connection_timeout=5, read_timeout=15, retry_total=0)
                     state.get.return_value.user_isolation = False
                     with self.assertRaises(ValueError):
                         async with user_context('demo', Mock(), 'memory'):
@@ -56,7 +58,7 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         await context.forget()
         for call in (memories.create_memory.call_args, memories.search_memories.call_args, memories.delete_scope.call_args):
             self.assertEqual(call.kwargs['scope'], 'demo:opaque')
-        state.set_item.assert_awaited_once_with('memory-scope', {'scope': 'opaque'})
+        state.set_item.assert_not_called()
 
     async def test_grader_and_oversized_checkpoint_rejected_before_write(self):
         state = Mock(set_item=AsyncMock())
@@ -177,3 +179,13 @@ class PublicationTests(unittest.TestCase):
             version.metadata['corpus_sha256'] = 'foreign'
             with self.assertRaises(ValueError):
                 publish(project, openai, directory, 'a' * 63, 'b' * 40, 'example/repo', 'agents/demo/knowledge')
+
+
+class ForgetIsolationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_named_forget_cannot_delete_another_callers_memory(self):
+        memories = Mock()
+        memories.get_memory.return_value = SimpleNamespace(scope='another-caller')
+        context = Context(Mock(), memories, 'memory', 'own-caller')
+        with self.assertRaises(ValueError):
+            await context.forget('mem-other')
+        memories.delete_memory.assert_not_called()

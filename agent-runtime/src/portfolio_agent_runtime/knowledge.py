@@ -28,7 +28,10 @@ def ensure_memory(project, name, chat_model, embedding_model, retention_days=30)
             current = project.beta.memory_stores.create(name=name, definition=definition)
         except ResourceExistsError:
             current = project.beta.memory_stores.get(name)
-    if dict(current.definition) != dict(definition):
+    actual = current.definition
+    if (actual.chat_model != chat_model or actual.embedding_model != embedding_model
+            or any(getattr(actual.options, key) != getattr(definition.options, key) for key in (
+                'user_profile_enabled', 'chat_summary_enabled', 'procedural_memory_enabled', 'default_ttl_seconds'))):
         raise ValueError('Existing memory definition differs; migrate explicitly, never silently reset memory')
     return current
 

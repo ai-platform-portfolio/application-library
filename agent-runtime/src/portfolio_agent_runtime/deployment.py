@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import ssl
+from urllib.parse import urlsplit
 
 from azure.ai.projects import AIProjectClient
 from azure.identity import DefaultAzureCredential
@@ -26,7 +28,8 @@ def configure(path):
         repository, revision = os.environ['GITHUB_REPOSITORY'], os.environ['SOURCE_REVISION']
         memory_name = environment + '-memory'
         with DefaultAzureCredential() as credential, AIProjectClient(
-                endpoint=os.environ['FOUNDRY_PROJECT_ENDPOINT'], credential=credential) as project:
+                endpoint=os.environ['FOUNDRY_PROJECT_ENDPOINT'], credential=credential,
+                connection_timeout=5, read_timeout=15, retry_total=0) as project:
             ensure_memory(project, memory_name, config['model'], memory.get('embedding_model', 'embedding'),
                           memory.get('retention_days', 30))
             with project.get_openai_client() as openai:
@@ -35,8 +38,23 @@ def configure(path):
         record = Path(os.environ['RUNNER_TEMP']) / 'acceptance' / 'knowledge.json'
         record.parent.mkdir(parents=True, exist_ok=True)
         record.write_text(json.dumps(manifest, indent=2))
-    subprocess.run(['azd', 'env', 'set', 'MEMORY_STORE_NAME=' + memory_name,
-                    'KNOWLEDGE_MANIFEST_JSON=' + json.dumps(manifest, separators=(',', ':')),
+    values = {'MEMORY_STORE_NAME': memory_name,
+              'KNOWLEDGE_MANIFEST_JSON': json.dumps(manifest, separators=(',', ':')),
+              'AGENT_DIAGNOSTICS_BACKEND': os.getenv('AGENT_DIAGNOSTICS_BACKEND') or 'provided'}
+    keys = ('KUBE_API_URL', 'KUBE_CA_PEM', 'KUBE_ALLOWED_NAMESPACE', 'KUBE_ALLOWED_WORKLOAD')
+    if values['AGENT_DIAGNOSTICS_BACKEND'] == 'kubernetes':
+        values.update({key: os.environ[key] for key in keys})
+        if not all(values[key] for key in keys):
+            raise ValueError('Live diagnostics needs the explicit repository-level target and CA inputs')
+        endpoint = urlsplit(values['KUBE_API_URL'])
+        if endpoint.scheme != 'https' or not endpoint.hostname or endpoint.username is not None or endpoint.query or endpoint.fragment:
+            raise ValueError('Kubernetes endpoint must use validated HTTPS')
+        ssl.create_default_context(cadata=values['KUBE_CA_PEM'])
+    elif values['AGENT_DIAGNOSTICS_BACKEND'] == 'provided':
+        values.update({key: '' for key in keys})
+    else:
+        raise ValueError('Diagnostics backend must be provided or kubernetes')
+    subprocess.run(['azd', 'env', 'set', *[f'{key}={value}' for key, value in values.items()],
                     '--environment', environment, '--no-prompt'], check=True, timeout=30)
 
 

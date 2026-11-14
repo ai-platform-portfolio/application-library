@@ -14,7 +14,7 @@ async def invoke(payload, investigate, *, agent, project, memory_store, retentio
         'investigate': {'operation', 'incident', 'investigation_id'},
         'remember': {'operation', 'content', 'review'},
         'recall': {'operation', 'query'},
-        'forget': {'operation'},
+        'forget': {'operation', 'memory_id'},
         'resume': {'operation', 'investigation_id'},
         'forget_investigation': {'operation', 'investigation_id'},
     }
@@ -26,7 +26,7 @@ async def invoke(payload, investigate, *, agent, project, memory_store, retentio
         if operation == 'recall':
             return {'memories': await context.recall(payload['query'])}
         if operation == 'forget':
-            return await context.forget()
+            return await context.forget(payload.get('memory_id'))
         if operation == 'resume':
             return {'checkpoint': await context.resume(payload['investigation_id'])}
         if operation == 'forget_investigation':
