@@ -1,0 +1,93 @@
+name: Python packages
+
+on:
+  pull_request:
+    paths: ['*/**', '.github/workflows/packages.yml']
+  push:
+    branches: [main]
+    paths: ['*/**', '.github/workflows/packages.yml']
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Root package directory; empty builds/tests all packages.
+        type: string
+
+      publish:
+        description: Publish the selected package version from main.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      packages: ${{ steps.tests.outputs.packages }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Test installed library packages
+        id: tests
+        env:
+          SELECTED_PACKAGE: ${{ inputs.package }}
+          PUBLISH: ${{ inputs.publish || false }}
+        run: |
+          if [[ "$PUBLISH" == true ]]; then
+            [[ "$GITHUB_REF" == refs/heads/main && -n "$SELECTED_PACKAGE" ]] || {
+              echo '::error::Publishing requires main and one explicit package directory.'
+              exit 1
+            }
+          fi
+
+          packages='[]'
+          for project in */pyproject.toml; do
+            [[ -f "$project" ]] || continue
+            package=${project%/*}
+            [[ -z "$SELECTED_PACKAGE" || "$SELECTED_PACKAGE" == "$package" ]] || continue
+            [[ "$package" =~ ^[a-z0-9][a-z0-9_-]*$ && ! -L "$package" ]] || exit 1
+
+            environment="$RUNNER_TEMP/python-$package"
+            python3 -m venv "$environment"
+            "$environment/bin/pip" install --only-binary=:all: "./$package"
+            if [[ -d "$package/tests" ]]; then
+              "$environment/bin/python" -m unittest discover -s "$package/tests" -v
+            fi
+            packages=$(jq -c --arg package "$package" '. + [$package]' <<< "$packages")
+          done
+          [[ "$packages" != '[]' ]] || { echo '::error::No matching Python package.'; exit 1; }
+          echo "packages=$packages" >> "$GITHUB_OUTPUT"
+
+  package:
+    needs: tests
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.tests.outputs.packages) }}
+
+    concurrency:
+      group: python-package-${{ matrix.package }}-${{ github.ref }}
+      cancel-in-progress: false
+
+    uses: ai-platform-portfolio/ops-shared/.github/workflows/python-package.yml@ba375b62938ccba3ff8a4d1c9561774ca07be413
+    with:
+      package-directory: ${{ matrix.package }}
+      revision: ${{ github.event.pull_request.head.sha || github.sha }}
+      artifact-name: python-${{ matrix.package }}
+      release-prefix: ${{ matrix.package }}-v
+      publish: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.publish }}
+
+  linear:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    uses: ai-platform-portfolio/ops-shared/.github/workflows/linear-issue-check.yml@eddfe0cc46d5a2d60cb9b576d635f1d33aa8d9dc
+    secrets:
+      LINEAR_CLIENT_ID: ${{ secrets.LINEAR_CLIENT_ID }}
+      LINEAR_CLIENT_SECRET: ${{ secrets.LINEAR_CLIENT_SECRET }}
