@@ -15,7 +15,7 @@ create infrastructure or run an AKS worker.
 | `hosting.py` | Composes explicit memory commands and the investigator without mixing history with current evidence. |
 | `handoff.py` | CLI bindings for isolated CI fetch, validation and draft publication. |
 | `deployment.py` | Native azd hook for reviewed knowledge, memory definition and explicit optional diagnostic inputs. |
-| `coding.py` | Restored archive's exact-base fetch, bounded proposal, validation binding and draft-only GitHub publication. The caller supplies the appropriate execution and credential boundaries. |
+| `coding.py` | Exact-base fetch, bounded proposal, validation binding and draft-only GitHub publication. The caller supplies execution and credential boundaries. |
 
 ## Durable context
 
@@ -87,9 +87,7 @@ transaction.
 
 ## Coding boundaries
 
-The restored coding module is adapted from
-[sre-agent-foundry](https://github.com/sre-agent-foundry/application-library/tree/main/agent-factory).
-It supplies functions, not worker infrastructure. Run fetching with a read token,
+The coding module supplies functions, not worker infrastructure. Run fetching with a read token,
 proposal generation in Foundry without GitHub write credentials, validation in a
 network-disabled, non-root Docker sandbox without credentials, and publication with a repository-scoped,
 short-lived write token. The publisher never executes checkout code and creates
@@ -105,7 +103,7 @@ required_evidence:
 ```
 
 `prepare` requires that source and every declared tool, an actionable diagnosis
-and a trace ID before fetching source. The SRE consumer declares Kubernetes source
+and a trace ID before fetching source. Each consumer declares its evidence source
 and tool names in its own configuration. The model cannot choose this policy.
 
 ## Build and verification
@@ -117,7 +115,7 @@ in their requirements.txt after the user merges and publishes this package.
 
 Tests cover authenticated scope requirements, isolation/TTL mismatch rejection,
 explicit review, recall/forget scope consistency, grader/size guards, curated
-corpus boundaries, returned-source citations, and archived proposal/publication
+corpus boundaries, returned-source citations, and proposal/publication
 contracts. They make no model calls. Foundry restart/recall, different-user
 isolation, server TTL enforcement, toolbox ingestion and deletion remain required
 live acceptance gates.

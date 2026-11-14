@@ -1,6 +1,6 @@
 """Template: configuration, model injection and a bounded model/tool loop.
 
-Adapted from sre-agent-foundry. The consumer supplies its configuration path, tools and result validation.
+The consumer supplies its configuration path, tools and result validation.
 """
 import json
 import os

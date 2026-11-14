@@ -23,11 +23,3 @@ main with `package=observability` and `publish=true`. Release tags use the direc
 and wheel version, such as `observability-v0.1.0`. Native Git/GitHub CLI publish
 without forcing tags or overwriting releases; no custom publisher/recovery script.
 
-## Retired agent factory
-
-The Foundry agent factory has been removed from this portfolio. Its historical
-source is preserved in the private
-[sre-agent-foundry/application-library](https://github.com/sre-agent-foundry/application-library)
-repository. The old AKS runtime topology, publisher jobs and Helm charts remain retired.
-The new runtime package restores reusable business capabilities for Foundry
-hosting; its tests and README distinguish source implementation from live delivery.
