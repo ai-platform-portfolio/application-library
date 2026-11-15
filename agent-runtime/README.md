@@ -32,8 +32,10 @@ credentials or hidden reasoning. `remember` is an explicit authenticated-owner
 command, outside the model's tool allowlist; it requires approved content and an
 HTTPS review reference. That URL records the owner's attribution: it does not
 verify an external review system. Generated diagnoses are never automatically
-remembered as facts. `recall` returns at most three memories (8 KiB total), each
-with a stable ID and update time. `forget` clears that user's managed-memory scope;
+remembered as facts. Approved free-form notes are direct `user_profile` memory
+items, retaining their content and review attribution. Procedural items require
+structured procedure content and are not used for these notes. `recall` returns
+at most three memories (8 KiB total), each with a stable ID and update time. `forget` clears that user's managed-memory scope;
 `forget_investigation` separately deletes a checkpoint.
 
 Configure the memory store with `ensure_memory`, the chat deployment, embedding
