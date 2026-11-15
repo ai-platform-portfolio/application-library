@@ -47,14 +47,18 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         state.set_item = AsyncMock()
         memories.create_memory.return_value = SimpleNamespace(memory_id='remembered')
         memories.search_memories.return_value = SimpleNamespace(memories=[SimpleNamespace(memory_item=SimpleNamespace(
-            memory_id='remembered', content='Reviewed operating procedure', updated_at=datetime.now(timezone.utc)))])
+            memory_id='remembered', content='Reviewed operational context', updated_at=datetime.now(timezone.utc)))])
         context = Context(state, memories, 'managed-memory', 'demo:opaque')
         with self.assertRaises(ValueError):
             await context.remember('Do something without an explicit review.', {'approved': False, 'url': 'https://example.test/review'})
         memories.create_memory.assert_not_called()
-        saved = await context.remember('Reviewed operating procedure for later investigations.',
-                                       {'approved': True, 'url': 'https://example.test/review'})
-        self.assertEqual(saved['id'], (await context.recall('operating procedure'))[0]['id'])
+        content = 'Reviewed operational context for later investigations.'
+        review = {'approved': True, 'url': 'https://example.test/review'}
+        saved = await context.remember(content, review)
+        memories.create_memory.assert_called_once_with(
+            'managed-memory', scope='demo:opaque', kind='user_profile',
+            content=json.dumps({'content': content, 'review': review['url']}, sort_keys=True))
+        self.assertEqual(saved['id'], (await context.recall('operational context'))[0]['id'])
         await context.forget()
         for call in (memories.create_memory.call_args, memories.search_memories.call_args, memories.delete_scope.call_args):
             self.assertEqual(call.kwargs['scope'], 'demo:opaque')

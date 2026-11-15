@@ -91,7 +91,7 @@ class Context:
             raise ValueError('Remember requires bounded content and explicit review attribution')
         record = json.dumps({'content': content, 'review': review['url']}, sort_keys=True)
         item = await asyncio.to_thread(self.memories.create_memory, self.memory_store,
-                                       scope=self.scope, content=record, kind='procedural')
+                                       scope=self.scope, content=record, kind='user_profile')
         return {'id': item.memory_id, 'review': review['url']}
 
     async def recall(self, query):
