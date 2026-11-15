@@ -29,8 +29,9 @@ def bounded(value, maximum=8192):
     return value
 
 
-def identifier(value):
-    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', value):
+def identifier(value, maximum=128):
+    if (not isinstance(value, str) or not 1 <= len(value) <= maximum
+            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', value)):
         raise ValueError('Invalid context identifier')
     return value
 
@@ -109,7 +110,7 @@ class Context:
     async def forget(self, memory_id=None):
         headers = get_request_context().platform_headers()
         if memory_id is not None:
-            identifier(memory_id)
+            identifier(memory_id, maximum=512)
             item = await asyncio.to_thread(self.memories.get_memory, self.memory_store, memory_id, headers=headers)
             if item.scope != self.scope:
                 raise ValueError('Memory does not belong to this authenticated caller')
