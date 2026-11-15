@@ -38,7 +38,7 @@ async def invoke(payload, investigate, *, agent, project, memory_store, retentio
         historical = {'memories': await context.recall(query)}
         if knowledge is not None:
             historical['knowledge'] = await asyncio.to_thread(
-                knowledge_query, project, knowledge['toolbox'], query, knowledge['sources'])
+                knowledge_query, project, knowledge['vector_store'], query, knowledge['sources'])
         result = await asyncio.to_thread(investigate, {'incident': incident}, historical)
         # The application validates current tool evidence before this call returns.
         # Historical context is returned separately; it is never a diagnostic tool.

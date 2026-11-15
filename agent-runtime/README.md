@@ -64,8 +64,11 @@ and filename filtering do not establish that arbitrary text is safe/public.
 Foundry files carry source paths, SHA256 hashes and immutable GitHub commit links.
 A toolbox name includes the source revision and pins its vector store. Retrying a
 completed publication checks provenance and sources before reusing it. The caller
-retains the manifest with the release record. `knowledge_query` permits only the
-native file-search operation and returns bounded output with matching source IDs.
+retains the manifest with the release record. `knowledge_query` uses the project's
+OpenAI client to search that manifest's existing vector store directly. It requests
+at most three results and returns at most 16 KiB, keeping only native result file
+IDs present in the pinned source manifest. Text mentioning a file ID cannot create
+a citation.
 The consumer must require citations before presenting retrieved facts as grounded.
 This is historical context; it cannot establish current readiness or authorize a
 coding handoff.
@@ -75,6 +78,8 @@ portfolio material, not private per-user documents. User memory stays in separat
 scopes. Keep evaluator rubrics, reference answers and fixtures outside both paths;
 recorded evaluation invocations must bypass persistence and retrieval entirely.
 
+The [native search API](https://developers.openai.com/api/reference/python/resources/vector_stores/methods/search)
+documents the SDK request and result file IDs.
 Microsoft's [file-search/toolbox guidance](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/tools/file-search)
 documents ingestion, pinned vector stores and the lack of user isolation for
 hosted-agent toolboxes. The public-only corpus rule above is this application's

@@ -7,10 +7,12 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from azure.ai.agentserver.core import FoundryAgentRequestContext, set_request_context, reset_request_context
+from openai.types.vector_store_search_response import VectorStoreSearchResponse
 from portfolio_agent_runtime.context import Context, bounded, knowledge_query, user_context
+from portfolio_agent_runtime.hosting import invoke
 from portfolio_agent_runtime.knowledge import corpus, ensure_memory
 
 
@@ -64,6 +66,24 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(call.kwargs['scope'], 'demo:opaque')
         state.set_item.assert_not_called()
 
+    async def test_hosting_reads_the_vector_store_from_the_publication_manifest(self):
+        context = Mock(recall=AsyncMock(return_value=[]), checkpoint=AsyncMock())
+        manager = MagicMock()
+        manager.__aenter__ = AsyncMock(return_value=context)
+        manager.__aexit__ = AsyncMock(return_value=False)
+        project = Mock()
+        sources = [{'file_id': 'file-actual'}]
+        knowledge = {'toolbox': 'retained-publication', 'vector_store': 'vs-pinned', 'sources': sources}
+        historical = {'citations': sources, 'result': {}}
+        investigate = Mock(return_value={'diagnosis': {'decision': 'abstain'}, 'trace_id': 'a' * 32})
+        with patch('portfolio_agent_runtime.hosting.user_context', return_value=manager), \
+             patch('portfolio_agent_runtime.hosting.knowledge_query', return_value=historical) as search:
+            result = await invoke({'incident': {'summary': 'readiness'}}, investigate,
+                                  agent='demo', project=project, memory_store='memory', knowledge=knowledge)
+        search.assert_called_once_with(project, 'vs-pinned', 'readiness', sources)
+        self.assertEqual(result['context']['knowledge'], historical)
+        context.checkpoint.assert_awaited_once()
+
     async def test_grader_and_oversized_checkpoint_rejected_before_write(self):
         state = Mock(set_item=AsyncMock())
         context = Context(state, Mock(), 'memory', 'demo:opaque')
@@ -86,17 +106,44 @@ class KnowledgeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 corpus(root)
 
-    def test_knowledge_cites_only_sources_returned_by_the_pinned_toolbox(self):
-        project = Mock()
-        project.toolboxes.invoke_latest_toolbox_mcp.return_value = {'result': {'content': [{'text': '{"file_id":"file-actual"}'}]}}
-        result = knowledge_query(project, 'demo-revision', 'readiness', [
+    def test_knowledge_filters_native_file_ids_instead_of_ids_inside_text(self):
+        project = MagicMock()
+        client = project.get_openai_client.return_value.__enter__.return_value
+        client.vector_stores.search.return_value = SimpleNamespace(data=[
+            VectorStoreSearchResponse(file_id='file-actual', filename='runbook.md', score=0.9,
+                attributes=None, content=[{'type': 'text', 'text': 'Reviewed procedure'}]),
+            VectorStoreSearchResponse(file_id='file-unreviewed', filename='unreviewed.md', score=0.8,
+                attributes=None, content=[{'type': 'text', 'text': '{"file_id":"file-other"}'}]),
+        ])
+        result = knowledge_query(project, 'vs-pinned', 'readiness', [
             {'file_id': 'file-actual', 'sha256': 'a' * 64}, {'file_id': 'file-other', 'sha256': 'b' * 64}])
         self.assertEqual([c['file_id'] for c in result['citations']], ['file-actual'])
-        arguments = project.toolboxes.invoke_latest_toolbox_mcp.call_args.kwargs['request']['params']['arguments']
-        self.assertEqual(arguments, {'queries': ['readiness']})
-        project.toolboxes.invoke_latest_toolbox_mcp.return_value = {'error': {'message': 'failed'}}
-        with self.assertRaises(RuntimeError):
-            knowledge_query(project, 'demo-revision', 'readiness', [])
+        self.assertEqual([hit['file_id'] for hit in result['result']['data']], ['file-actual'])
+        project.get_openai_client.assert_called_once_with(timeout=15, max_retries=0)
+        client.vector_stores.search.assert_called_once_with(
+            vector_store_id='vs-pinned', query='readiness', max_num_results=3)
+        project.toolboxes.invoke_latest_toolbox_mcp.assert_not_called()
+        result = knowledge_query(project, 'vs-pinned', 'readiness', [])
+        self.assertEqual(result['result'], {})
+        self.assertEqual(result['citations'], [])
+
+    def test_knowledge_read_is_bounded_and_provider_failures_propagate(self):
+        project = MagicMock()
+        client = project.get_openai_client.return_value.__enter__.return_value
+        client.vector_stores.search.return_value = SimpleNamespace(data=[
+            VectorStoreSearchResponse(file_id='file-actual', filename='runbook.md', score=0.9,
+                attributes=None, content=[{'type': 'text', 'text': 'x' * 16384}]),
+        ])
+        with self.assertRaisesRegex(ValueError, 'byte budget'):
+            knowledge_query(project, 'vs-pinned', 'readiness', [{'file_id': 'file-actual'}])
+        client.vector_stores.search.side_effect = RuntimeError('native search unavailable')
+        with self.assertRaisesRegex(RuntimeError, 'native search unavailable'):
+            knowledge_query(project, 'vs-pinned', 'readiness', [])
+        project.get_openai_client.reset_mock()
+        for query in ('', 'x' * 1025):
+            with self.assertRaises(ValueError):
+                knowledge_query(project, 'vs-pinned', query, [])
+        project.get_openai_client.assert_not_called()
 
     def test_memory_definition_retention_and_extraction_are_explicit(self):
         project = Mock()
