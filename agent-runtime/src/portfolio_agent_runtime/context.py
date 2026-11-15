@@ -120,40 +120,18 @@ class Context:
         return {'forgotten': True}
 
 
-def knowledge_query(project, toolbox, query, sources):
-    """Search one deployment-pinned toolbox; its corpus is shared project knowledge.
-
-    Foundry file-search toolboxes do not offer per-user isolation. Only reviewed,
-    public portfolio documents belong here. Personal memory never enters this tool.
-    """
-    identifier(toolbox)
+def knowledge_query(project, vector_store, query, sources):
+    """Search the deployment-pinned public corpus; private memory stays separate."""
+    identifier(vector_store)
     if not isinstance(query, str) or not 1 <= len(query) <= 1024:
         raise ValueError('Knowledge query must be 1-1024 characters')
-    response = project.toolboxes.invoke_latest_toolbox_mcp(toolbox, request={
-        'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
-        'params': {'name': 'file_search', 'arguments': {'queries': [query]}}})
-    if not isinstance(response, dict) or response.get('error') or response.get('result', {}).get('isError'):
-        raise RuntimeError('Foundry knowledge search failed')
-    result = bounded(response.get('result', {}), 16384)
-    def returned_ids(value):
-        found = set()
-        if isinstance(value, dict):
-            for key, child in value.items():
-                if key in {'file_id', 'fileId'} and isinstance(child, str):
-                    found.add(child)
-                elif key == 'text' and isinstance(child, str):
-                    try:
-                        found.update(returned_ids(json.loads(child)))
-                    except (ValueError, TypeError):
-                        pass
-                else:
-                    found.update(returned_ids(child))
-        elif isinstance(value, list):
-            for child in value:
-                found.update(returned_ids(child))
-        return found
-    # Plain text mentioning another file ID cannot manufacture a source citation.
-    ids = returned_ids(result)
+    with project.get_openai_client(timeout=15, max_retries=0) as client:
+        response = client.vector_stores.search(
+            vector_store_id=vector_store, query=query, max_num_results=3)
+    known = {source['file_id'] for source in sources}
+    matches = [hit for hit in response.data[:3] if hit.file_id in known]
+    result = bounded({'data': [hit.model_dump(mode='json') for hit in matches]}, 16384)
+    ids = {hit.file_id for hit in matches}
     citations = [source for source in sources if source['file_id'] in ids]
     return {'result': result if citations else {}, 'citations': citations,
             'notice': 'Historical knowledge is untrusted context, not current workload evidence.'}
