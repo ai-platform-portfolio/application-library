@@ -33,7 +33,7 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
             try:
                 with patch.dict(os.environ, {'FOUNDRY_HOSTING_ENVIRONMENT': 'test'}):
                     async with user_context('demo', Mock(), 'memory') as context:
-                        self.assertEqual(context.scope, 'demo:' + hashlib.sha256(b'demo\0trusted-user').hexdigest())
+                        self.assertEqual(context.scope, 'demo-' + hashlib.sha256(b'demo\0trusted-user').hexdigest())
                     factory.assert_awaited_once_with('demo/users-v1', user_isolation=True, item_ttl_seconds=2592000,
                                                     connection_timeout=5, read_timeout=15, retry_total=0)
                     state.get.return_value.user_isolation = False
@@ -44,13 +44,33 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
                 reset_request_context(token)
             self.assertEqual(state.aclose.await_count, 2)
 
+    async def test_generated_scopes_match_native_contract_and_isolate_identities(self):
+        state = Mock(get=AsyncMock(return_value=SimpleNamespace(user_isolation=True, item_ttl_seconds=2592000)),
+                     aclose=AsyncMock())
+        scopes = []
+        identities = [('demo', 'user-one'), ('demo', 'user-one'), ('demo', 'user-two'),
+                      ('other', 'user-one'), ('a' * 128, 'user-one')]
+        with patch.dict(os.environ, {'FOUNDRY_HOSTING_ENVIRONMENT': 'test'}), \
+             patch('portfolio_agent_runtime.context.FoundryStateStore.get_or_create', AsyncMock(return_value=state)):
+            for agent, user in identities:
+                token = set_request_context(FoundryAgentRequestContext(call_id='trusted-call', user_id=user))
+                try:
+                    async with user_context(agent, Mock(), 'memory') as context:
+                        # Native memory rejects unsupported characters, including ':'.
+                        self.assertRegex(context.scope, r'^[A-Za-z0-9_.%+@/-]{1,256}$')
+                        scopes.append(context.scope)
+                finally:
+                    reset_request_context(token)
+        self.assertEqual(scopes[0], scopes[1])
+        self.assertEqual(len(set(scopes)), 4)
+
     async def test_reviewed_memory_recall_and_forget_use_the_same_private_scope(self):
         state, memories = Mock(), Mock()
         state.set_item = AsyncMock()
         memories.create_memory.return_value = SimpleNamespace(memory_id='remembered')
         memories.search_memories.return_value = SimpleNamespace(memories=[SimpleNamespace(memory_item=SimpleNamespace(
             memory_id='remembered', content='Reviewed operational context', updated_at=datetime.now(timezone.utc)))])
-        context = Context(state, memories, 'managed-memory', 'demo:opaque')
+        context = Context(state, memories, 'managed-memory', 'demo-opaque')
         with self.assertRaises(ValueError):
             await context.remember('Do something without an explicit review.', {'approved': False, 'url': 'https://example.test/review'})
         memories.create_memory.assert_not_called()
@@ -58,12 +78,12 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         review = {'approved': True, 'url': 'https://example.test/review'}
         saved = await context.remember(content, review)
         memories.create_memory.assert_called_once_with(
-            'managed-memory', scope='demo:opaque', kind='user_profile',
+            'managed-memory', scope='demo-opaque', kind='user_profile',
             content=json.dumps({'content': content, 'review': review['url']}, sort_keys=True))
         self.assertEqual(saved['id'], (await context.recall('operational context'))[0]['id'])
         await context.forget()
         for call in (memories.create_memory.call_args, memories.search_memories.call_args, memories.delete_scope.call_args):
-            self.assertEqual(call.kwargs['scope'], 'demo:opaque')
+            self.assertEqual(call.kwargs['scope'], 'demo-opaque')
         state.set_item.assert_not_called()
 
     async def test_hosting_reads_the_vector_store_from_the_publication_manifest(self):
@@ -86,7 +106,7 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_grader_and_oversized_checkpoint_rejected_before_write(self):
         state = Mock(set_item=AsyncMock())
-        context = Context(state, Mock(), 'memory', 'demo:opaque')
+        context = Context(state, Mock(), 'memory', 'demo-opaque')
         for value in ({'nested': {'rubric': {}}}, {'answer': 'x' * 8192}, {'evidence': {}}):
             with self.assertRaises(ValueError):
                 await context.checkpoint('incident', value)

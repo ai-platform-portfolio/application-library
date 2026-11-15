@@ -25,7 +25,10 @@ hosting environment and native call/user context. It never accepts user identity
 memory scope or a delegated identity from request JSON. The state store enables
 native user isolation and verifies existing isolation/TTL before use. A stable hash of the agent name and Foundry-authenticated user identity supplies
 the managed-memory scope without another mapping resource. It stays stable across
-agent versions; callers cannot supply another scope.
+agent versions; callers cannot supply another scope. The scope is
+`agent-SHA256(agent + NUL + user)`, using a hyphen because the native memory API
+rejects colons. Its allowed characters are letters, digits, `_-.%+@/`, with a
+256-character limit; the generated scope stays within that limit.
 
 `checkpoint` / `resume` retain bounded investigation state, not arbitrary logs,
 credentials or hidden reasoning. `remember` is an explicit authenticated-owner
