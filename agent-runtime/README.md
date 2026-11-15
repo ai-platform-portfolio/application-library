@@ -56,6 +56,13 @@ defines item ETags and conditional `if_match` writes. [Managed memory](https://l
 documents explicit scopes, retention and remember/forget operations. Managed memory
 is preview; these references describe APIs, not evidence of this consumer's live acceptance.
 
+The [hosted runtime contract](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agent-contract)
+requires the opaque call ID on outbound Foundry requests. Memory operations and
+native knowledge search use the current request context's `platform_headers()`
+per call. Only the call ID is forwarded; user IDs stay inside the container.
+Headers are never stored on shared clients. Outside a hosted request, no identity
+headers are added. State-store forwarding remains owned by its native SDK.
+
 ## Reviewed knowledge
 
 `publish` takes the corpus directory, agent identity, exact commit, repository and
