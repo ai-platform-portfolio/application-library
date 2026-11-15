@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
-from azure.ai.agentserver.core import FoundryAgentRequestContext, set_request_context, reset_request_context
+from azure.ai.agentserver.core import FoundryAgentRequestContext, get_request_context, set_request_context, reset_request_context
 from openai.types.vector_store_search_response import VectorStoreSearchResponse
 from portfolio_agent_runtime.context import Context, bounded, knowledge_query, user_context
 from portfolio_agent_runtime.hosting import invoke
@@ -79,12 +79,66 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         saved = await context.remember(content, review)
         memories.create_memory.assert_called_once_with(
             'managed-memory', scope='demo-opaque', kind='user_profile',
-            content=json.dumps({'content': content, 'review': review['url']}, sort_keys=True))
+            content=json.dumps({'content': content, 'review': review['url']}, sort_keys=True), headers={})
         self.assertEqual(saved['id'], (await context.recall('operational context'))[0]['id'])
         await context.forget()
         for call in (memories.create_memory.call_args, memories.search_memories.call_args, memories.delete_scope.call_args):
             self.assertEqual(call.kwargs['scope'], 'demo-opaque')
         state.set_item.assert_not_called()
+
+    async def test_memory_calls_use_current_context_without_shared_header_state(self):
+        memories = Mock()
+        context = Context(Mock(), memories, 'memory', 'demo-opaque')
+        observed = []
+
+        def response(*args, **kwargs):
+            headers = kwargs['headers']
+            self.assertEqual(headers, get_request_context().platform_headers())
+            observed.append(headers)
+            return SimpleNamespace(memory_id='remembered', memories=[], scope=context.scope)
+
+        for method in ('create_memory', 'search_memories', 'get_memory', 'delete_memory', 'delete_scope'):
+            getattr(memories, method).side_effect = response
+
+        async def caller(call_id):
+            token = set_request_context(FoundryAgentRequestContext(call_id=call_id, user_id='private-user'))
+            try:
+                await context.remember('Explicitly reviewed operational context.',
+                                       {'approved': True, 'url': 'https://example.test/review'})
+                await context.recall('operational context')
+                await context.forget('remembered')
+                await context.forget()
+            finally:
+                reset_request_context(token)
+
+        await asyncio.gather(caller('call-one'), caller('call-two'), caller(None))
+        for headers in ({'x-agent-foundry-call-id': 'call-one'}, {'x-agent-foundry-call-id': 'call-two'}, {}):
+            self.assertEqual(observed.count(headers), 5)
+        self.assertEqual(len(observed), 15)
+
+    async def test_knowledge_calls_use_current_context_in_worker_threads(self):
+        project = MagicMock()
+        client = project.get_openai_client.return_value.__enter__.return_value
+        observed = []
+
+        def search(**kwargs):
+            headers = kwargs['extra_headers']
+            self.assertEqual(headers, get_request_context().platform_headers())
+            observed.append(headers)
+            return SimpleNamespace(data=[])
+
+        client.vector_stores.search.side_effect = search
+
+        async def caller(call_id):
+            token = set_request_context(FoundryAgentRequestContext(call_id=call_id, user_id='private-user'))
+            try:
+                await asyncio.to_thread(knowledge_query, project, 'vs-pinned', 'readiness', [])
+            finally:
+                reset_request_context(token)
+
+        await asyncio.gather(caller('call-one'), caller('call-two'), caller(None))
+        self.assertCountEqual(observed, [{'x-agent-foundry-call-id': 'call-one'},
+                                        {'x-agent-foundry-call-id': 'call-two'}, {}])
 
     async def test_hosting_reads_the_vector_store_from_the_publication_manifest(self):
         context = Mock(recall=AsyncMock(return_value=[]), checkpoint=AsyncMock())
@@ -141,7 +195,7 @@ class KnowledgeTests(unittest.TestCase):
         self.assertEqual([hit['file_id'] for hit in result['result']['data']], ['file-actual'])
         project.get_openai_client.assert_called_once_with(timeout=15, max_retries=0)
         client.vector_stores.search.assert_called_once_with(
-            vector_store_id='vs-pinned', query='readiness', max_num_results=3)
+            vector_store_id='vs-pinned', query='readiness', max_num_results=3, extra_headers={})
         project.toolboxes.invoke_latest_toolbox_mcp.assert_not_called()
         result = knowledge_query(project, 'vs-pinned', 'readiness', [])
         self.assertEqual(result['result'], {})

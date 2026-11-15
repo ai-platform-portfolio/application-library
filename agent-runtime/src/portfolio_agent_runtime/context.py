@@ -91,7 +91,8 @@ class Context:
             raise ValueError('Remember requires bounded content and explicit review attribution')
         record = json.dumps({'content': content, 'review': review['url']}, sort_keys=True)
         item = await asyncio.to_thread(self.memories.create_memory, self.memory_store,
-                                       scope=self.scope, content=record, kind='user_profile')
+                                       scope=self.scope, content=record, kind='user_profile',
+                                       headers=get_request_context().platform_headers())
         return {'id': item.memory_id, 'review': review['url']}
 
     async def recall(self, query):
@@ -99,20 +100,22 @@ class Context:
             raise ValueError('Memory query must be 1-1024 characters')
         result = await asyncio.to_thread(self.memories.search_memories, self.memory_store,
                                         scope=self.scope, items=query,
-                                        options=MemorySearchOptions(max_memories=3))
+                                        options=MemorySearchOptions(max_memories=3),
+                                        headers=get_request_context().platform_headers())
         return bounded([{'id': hit.memory_item.memory_id, 'content': hit.memory_item.content,
                          'updated_at': hit.memory_item.updated_at.isoformat()}
                         for hit in result.memories])
 
     async def forget(self, memory_id=None):
+        headers = get_request_context().platform_headers()
         if memory_id is not None:
             identifier(memory_id)
-            item = await asyncio.to_thread(self.memories.get_memory, self.memory_store, memory_id)
+            item = await asyncio.to_thread(self.memories.get_memory, self.memory_store, memory_id, headers=headers)
             if item.scope != self.scope:
                 raise ValueError('Memory does not belong to this authenticated caller')
-            await asyncio.to_thread(self.memories.delete_memory, self.memory_store, memory_id)
+            await asyncio.to_thread(self.memories.delete_memory, self.memory_store, memory_id, headers=headers)
         else:
-            await asyncio.to_thread(self.memories.delete_scope, self.memory_store, scope=self.scope)
+            await asyncio.to_thread(self.memories.delete_scope, self.memory_store, scope=self.scope, headers=headers)
         return {'forgotten': True}
 
     async def forget_investigation(self, investigation_id):
@@ -127,7 +130,8 @@ def knowledge_query(project, vector_store, query, sources):
         raise ValueError('Knowledge query must be 1-1024 characters')
     with project.get_openai_client(timeout=15, max_retries=0) as client:
         response = client.vector_stores.search(
-            vector_store_id=vector_store, query=query, max_num_results=3)
+            vector_store_id=vector_store, query=query, max_num_results=3,
+            extra_headers=get_request_context().platform_headers())
     known = {source['file_id'] for source in sources}
     matches = [hit for hit in response.data[:3] if hit.file_id in known]
     result = bounded({'data': [hit.model_dump(mode='json') for hit in matches]}, 16384)
