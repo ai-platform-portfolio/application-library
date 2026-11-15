@@ -59,7 +59,7 @@ async def user_context(agent, project, memory_store, retention_days=30):
         # stable agent name: no caller-selected scope or extra mapping resource,
         # and memory identity does not change when a new version is deployed.
         scope = hashlib.sha256(f'{agent}\0{ctx.user_id}'.encode()).hexdigest()
-        yield Context(store, project.beta.memory_stores, memory_store, f'{agent}:{scope}')
+        yield Context(store, project.beta.memory_stores, memory_store, f'{agent}-{scope}')
     finally:
         await store.aclose()
 
