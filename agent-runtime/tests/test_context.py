@@ -86,6 +86,21 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(call.kwargs['scope'], 'demo-opaque')
         state.set_item.assert_not_called()
 
+    async def test_named_forget_accepts_long_native_ids_with_existing_scope_check(self):
+        memory_id = 'a' * 110 + '_' + 'b' * 32  # Native ID for an 82-character scope.
+        memories = Mock()
+        memories.get_memory.return_value = SimpleNamespace(scope='own-caller')
+        context = Context(Mock(), memories, 'memory', 'own-caller')
+        await context.forget(memory_id)
+        memories.get_memory.assert_called_once_with('memory', memory_id, headers={})
+        memories.delete_memory.assert_called_once_with('memory', memory_id, headers={})
+        for invalid in ('a' * 513, '../another-record'):
+            with self.assertRaises(ValueError):
+                await context.forget(invalid)
+        self.assertEqual(memories.get_memory.call_count, 1)
+        with self.assertRaises(ValueError):
+            await context.resume(memory_id)
+
     async def test_memory_calls_use_current_context_without_shared_header_state(self):
         memories = Mock()
         context = Context(Mock(), memories, 'memory', 'demo-opaque')

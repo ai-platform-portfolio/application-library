@@ -9,7 +9,7 @@ create infrastructure or run an AKS worker.
 | --- | --- |
 | `agent.py` | Shared model injection and bounded model/tool loop; the consumer supplies instructions and tools. |
 | `evaluation.py` | Dataset/reference separation and six contract checks; no model or state operations. |
-| `context.py` | Native per-user state, explicit reviewed memory writes, bounded recall and forget; native file-search toolbox queries. |
+| `context.py` | Native per-user state, explicit reviewed memory writes, bounded recall and forget; direct searches of the publication-pinned vector store. |
 | `knowledge.py` | Reviewed Markdown ingestion, source hashes and commit links, managed-memory definition, revision-specific toolbox publication and ordered cleanup. |
 | `intake.py` | Native per-caller Event UID deduplication, retry leases and a two-per-minute bound; fixed incident text. |
 | `hosting.py` | Composes explicit memory commands and the investigator without mixing history with current evidence. |
@@ -38,7 +38,10 @@ verify an external review system. Generated diagnoses are never automatically
 remembered as facts. Approved free-form notes are direct `user_profile` memory
 items, retaining their content and review attribution. Procedural items require
 structured procedure content and are not used for these notes. `recall` returns
-at most three memories (8 KiB total), each with a stable ID and update time. `forget` clears that user's managed-memory scope;
+at most three memories (8 KiB total), each with a stable ID and update time.
+Native memory IDs are opaque and may exceed 128 characters; named deletion accepts
+up to 512 URL-safe identifier characters while other identifiers remain limited to
+128. `forget` clears that user's managed-memory scope;
 `forget_investigation` separately deletes a checkpoint.
 
 Configure the memory store with `ensure_memory`, the chat deployment, embedding
