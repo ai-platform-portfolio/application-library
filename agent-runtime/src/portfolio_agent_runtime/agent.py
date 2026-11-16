@@ -29,17 +29,50 @@ def load_config(config_path):
     return config
 
 
-def model_client(credential, endpoint=None):
-    """Foundry injects the project endpoint; Azure Identity supplies short-lived tokens."""
-    endpoint = (os.environ.get('MODEL_BASE_URL')
-                or (endpoint or os.environ['FOUNDRY_PROJECT_ENDPOINT']).rstrip('/') + '/openai/v1/')
-    url = urlsplit(endpoint)
-    if url.scheme != 'https' or not url.hostname or url.username is not None or url.query or url.fragment:
-        raise ValueError('Project endpoint must be an HTTPS URL without credentials or query')
-    scope = os.getenv('MODEL_TOKEN_SCOPE', 'https://ai.azure.com/.default')
-    if not scope.startswith(('https://', 'api://')) or not scope.endswith('/.default') or any(c.isspace() for c in scope):
+def model_settings(model=None):
+    """Validate inference intent without opening a client or changing Foundry services."""
+    mode = os.getenv('MODEL_CONNECTION_MODE', 'foundry')
+    auth = os.getenv('MODEL_AUTH_METHOD', 'entra')
+    base = os.getenv('MODEL_BASE_URL', '')
+    scope = os.getenv('MODEL_TOKEN_SCOPE') or 'https://ai.azure.com/.default'
+    key = os.getenv('MODEL_API_KEY', '')
+    deployment = os.getenv('MODEL_DEPLOYMENT_NAME', model)
+    if mode not in {'foundry', 'gateway'} or auth not in {'entra', 'api_key'}:
+        raise ValueError('Declare foundry/gateway mode and entra/api_key authentication')
+    if mode == 'foundry' and auth != 'entra':
+        raise ValueError('Direct Foundry uses Entra authentication')
+    if mode == 'gateway' and (not base or not deployment or not os.getenv('MODEL_AUTH_METHOD')):
+        raise ValueError('Gateway mode requires an explicit endpoint, model and authentication method')
+    if deployment is not None and (not deployment.strip() or deployment != deployment.strip()):
+        raise ValueError('Model deployment must be non-empty without surrounding whitespace')
+    if base:
+        validate_model_url(base)
+    if auth == 'api_key' and (not key or any(c.isspace() for c in key)):
+        raise ValueError('API-key authentication requires MODEL_API_KEY')
+    if mode == 'gateway' and auth == 'entra' and not os.getenv('MODEL_TOKEN_SCOPE'):
+        raise ValueError('Gateway Entra authentication requires an explicit token scope')
+    if auth == 'entra' and (not scope.startswith(('https://', 'api://')) or not scope.endswith('/.default') or any(c.isspace() for c in scope)):
         raise ValueError('Model token scope must be a declared HTTPS or api:// default scope')
-    token = get_bearer_token_provider(credential, scope)
+    return {'MODEL_CONNECTION_MODE': mode, 'MODEL_AUTH_METHOD': auth,
+            'MODEL_BASE_URL': base, 'MODEL_TOKEN_SCOPE': scope,
+            'MODEL_DEPLOYMENT_NAME': deployment, 'MODEL_API_KEY': key if auth == 'api_key' else ''}
+
+
+def validate_model_url(endpoint):
+    url = urlsplit(endpoint)
+    if (url.scheme != 'https' or not url.hostname or url.username is not None or url.query or url.fragment
+            or any(c.isspace() for c in endpoint)):
+        raise ValueError('Model endpoint must be an HTTPS URL without credentials or query')
+
+
+def model_client(credential, endpoint=None):
+    """Use exactly the selected inference connection; never retry through another route."""
+    settings = model_settings()
+    endpoint = (settings['MODEL_BASE_URL']
+                or (endpoint or os.environ['FOUNDRY_PROJECT_ENDPOINT']).rstrip('/') + '/openai/v1/')
+    validate_model_url(endpoint)
+    token = (get_bearer_token_provider(credential, settings['MODEL_TOKEN_SCOPE'])
+             if settings['MODEL_AUTH_METHOD'] == 'entra' else settings['MODEL_API_KEY'])
     return OpenAI(base_url=endpoint.rstrip('/') + '/', api_key=token, max_retries=0)
 
 
