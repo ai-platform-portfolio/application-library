@@ -11,46 +11,6 @@ from portfolio_agent_runtime.deployment import configure
 
 
 class DeploymentTests(unittest.TestCase):
-    def test_declared_gateway_workload_rejects_direct_selection(self):
-        with tempfile.TemporaryDirectory() as directory:
-            config = Path(directory) / 'agent.yaml'
-            config.write_text('model: chat\nconnection_mode: gateway\nmemory:\n  enabled: false\n')
-            with patch.dict(os.environ, {'AZURE_ENV_NAME': 'example'}, clear=True), patch(
-                    'portfolio_agent_runtime.deployment.subprocess.run') as command, self.assertRaises(ValueError):
-                configure(config)
-            command.assert_not_called()
-
-    def test_gateway_publication_never_creates_managed_memory_or_vector_store(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / 'knowledge').mkdir()
-            (root / 'knowledge' / 'runbook.md').write_text('Reviewed public runbook')
-            config = root / 'agent.yaml'
-            config.write_text('model: reasoning\nmemory:\n  enabled: true\nknowledge:\n  path: knowledge\n')
-            env = {'AZURE_ENV_NAME': 'example', 'MODEL_CONNECTION_MODE': 'gateway',
-                   'MODEL_AUTH_METHOD': 'api_key', 'MODEL_BASE_URL': 'https://gateway.test/v1',
-                   'MODEL_DEPLOYMENT_NAME': 'reasoning',
-                   'MODEL_API_KEY_SECRET_URI': 'https://test.vault.azure.net/secrets/reasoning',
-                   'EMBEDDING_MODEL_DEPLOYMENT_NAME': 'embedding', 'EMBEDDING_MODEL_VERSION': 'embedding-version',
-                   'EMBEDDING_MODEL_API_KEY_SECRET_URI': 'https://test.vault.azure.net/secrets/embedding',
-                   'GITHUB_WORKSPACE': directory, 'GITHUB_REPOSITORY': 'org/repo',
-                   'SOURCE_REVISION': 'a' * 40, 'RUNNER_TEMP': directory}
-            previous = Path.cwd()
-            os.chdir(root)
-            try:
-                with patch.dict(os.environ, env, clear=True), patch(
-                        'portfolio_agent_runtime.deployment.AIProjectClient') as project, patch(
-                        'portfolio_agent_runtime.deployment.subprocess.run', side_effect=self.capture):
-                    configure(config)
-                project.assert_not_called()
-                manifest = json.loads(self.values['KNOWLEDGE_MANIFEST_JSON'])
-                self.assertEqual(manifest['mode'], 'gateway')
-                self.assertEqual(manifest['sources'][0]['sha256'], __import__('hashlib').sha256(b'Reviewed public runbook').hexdigest())
-                self.assertEqual(self.values['MEMORY_STORE_NAME'], '')
-                self.assertEqual(self.values['MODEL_API_KEY'], '')
-            finally:
-                os.chdir(previous)
-
     def capture(self, arguments, **kwargs):
         path = Path(arguments[arguments.index('--file') + 1])
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)

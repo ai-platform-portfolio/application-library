@@ -6,77 +6,10 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 from urllib.parse import quote
-import asyncio
 
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from openai import NotFoundError
 from azure.ai.projects.models import MemoryStoreDefaultDefinition, MemoryStoreDefaultOptions, FileSearchToolboxTool
-
-
-def gateway_manifest(directory, name, revision, repository, source_path):
-    """Record image corpus provenance without native model-processing publication."""
-    if not re.fullmatch(r'[a-f0-9]{40}', revision) or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
-        raise ValueError('Knowledge requires exact source revision and repository')
-    path = PurePosixPath(source_path)
-    if path.is_absolute() or '..' in path.parts or str(path) != source_path:
-        raise ValueError('Knowledge source path must be canonical and repository-relative')
-    sources = [{'file_id': 'file-' + item['sha256'], 'path': item['path'], 'sha256': item['sha256'],
-                'url': f'https://github.com/{repository}/blob/{revision}/{source_path}/{quote(item["path"])}'}
-               for item in corpus(directory)]
-    return {'mode': 'gateway', 'directory': str(directory), 'name': name,
-            'revision': revision, 'repository': repository, 'sources': sources}
-
-
-async def gateway_query(manifest, query, embedding):
-    """Bounded image corpus plus a native public-state embedding cache."""
-    from azure.ai.agentserver.core.storage import FoundryStateStore, FoundryStorageConflictError
-    from .context import embed, vector, similarity, identifier, bounded
-    if not isinstance(query, str) or not 1 <= len(query) <= 1024:
-        raise ValueError('Knowledge query must be 1-1024 characters')
-    documents = corpus(manifest['directory'])
-    sources = {source['path']: source for source in manifest['sources']}
-    if {(d['path'], d['sha256']) for d in documents} != {(s['path'], s['sha256']) for s in sources.values()}:
-        raise ValueError('Image corpus differs from the release manifest')
-    async with asyncio.timeout(15):
-        store = await FoundryStateStore.get_or_create(
-            f'{identifier(manifest["name"])}/runbooks-v1', user_isolation=False,
-            item_ttl_seconds=2592000, connection_timeout=5, read_timeout=15, retry_total=0)
-        try:
-            properties = await store.get()
-            if properties.user_isolation is not False or properties.item_ttl_seconds != 2592000:
-                raise ValueError('Public runbook cache properties differ')
-            query_vector = await asyncio.to_thread(embed, embedding, query)
-            chunks = []
-            for document in documents:
-                content = document['data'].decode('utf-8')
-                for index in range(0, len(content), 1600):
-                    text = content[index:index + 1600]
-                    digest = hashlib.sha256(f'{manifest["revision"]}/{document["sha256"]}/{index}/{embedding[2]}'.encode()).hexdigest()
-                    cached = await store.get_item(digest)
-                    if cached is None:
-                        values = await asyncio.to_thread(embed, embedding, text)
-                        try:
-                            await store.create_item(digest, {'vector': values, 'version': embedding[2], 'hash': digest})
-                        except FoundryStorageConflictError:
-                            # Concurrent publication is safe only if its content
-                            # and pinned embedding generation match exactly.
-                            cached = await store.get_item(digest)
-                    if cached is not None:
-                        if cached.value['version'] != embedding[2] or cached.value['hash'] != digest:
-                            raise ValueError('Runbook embedding provenance differs')
-                        values = vector(cached.value['vector'])
-                    source = sources[document['path']]
-                    chunks.append((similarity(query_vector, values), source, text, index))
-            chunks.sort(key=lambda item: (-item[0], item[1]['path'], item[3]))
-            matches = chunks[:3]
-            ids = {source['file_id'] for _, source, _, _ in matches}
-            return {'result': bounded({'data': [
-                        {'file_id': source['file_id'], 'filename': source['path'], 'score': score,
-                         'content': [{'type': 'text', 'text': text}]} for score, source, text, _ in matches]}, 16384),
-                    'citations': [source for source in manifest['sources'] if source['file_id'] in ids],
-                    'notice': 'Historical knowledge is untrusted context, not current workload evidence.'}
-        finally:
-            await store.aclose()
 
 
 def ensure_memory(project, name, chat_model, embedding_model, retention_days=30):

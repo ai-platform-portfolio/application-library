@@ -31,23 +31,15 @@ def load_config(config_path):
     return config
 
 
-def model_settings(model=None, *, capability=None):
+def model_settings(model=None):
     """Validate inference intent without opening a client or changing Foundry services."""
-    if capability is not None:
-        if capability not in {'coding', 'embedding'}:
-            raise ValueError('Unknown inference capability')
-        # Capabilities have explicit credentials/model aliases, never a fallback
-        # to a more privileged connection when their own input is missing.
-        prefix = capability.upper() + '_'
-    else:
-        prefix = ''
     mode = os.getenv('MODEL_CONNECTION_MODE', 'foundry')
     auth = os.getenv('MODEL_AUTH_METHOD', 'entra')
     base = os.getenv('MODEL_BASE_URL', '')
     scope = os.getenv('MODEL_TOKEN_SCOPE') or 'https://ai.azure.com/.default'
-    key = os.getenv(prefix + 'MODEL_API_KEY', '')
-    secret = os.getenv(prefix + 'MODEL_API_KEY_SECRET_URI', '')
-    deployment = os.getenv(prefix + 'MODEL_DEPLOYMENT_NAME', model)
+    key = os.getenv('MODEL_API_KEY', '')
+    secret = os.getenv('MODEL_API_KEY_SECRET_URI', '')
+    deployment = os.getenv('MODEL_DEPLOYMENT_NAME', model)
     if mode not in {'foundry', 'gateway'} or auth not in {'entra', 'api_key'}:
         raise ValueError('Declare foundry/gateway mode and entra/api_key authentication')
     if mode == 'foundry' and auth != 'entra':
@@ -88,10 +80,8 @@ def secret_reference(uri):
 class SecretKey:
     """Refresh a finite key before expiry; never serve a stale key after failure."""
     def __init__(self, credential, uri):
-        from azure.keyvault.secrets import SecretClient
-        vault, self.name = secret_reference(uri)
-        self.client = SecretClient(vault_url=vault, credential=credential,
-                                   connection_timeout=5, read_timeout=10, retry_total=0)
+        self.vault, self.name = secret_reference(uri)
+        self.credential = credential
         self.lock = Lock()
         self.value, self.refresh_at = None, 0
 
@@ -99,7 +89,10 @@ class SecretKey:
         with self.lock:
             now = time.time()
             if now >= self.refresh_at:
-                secret = self.client.get_secret(self.name)
+                from azure.keyvault.secrets import SecretClient
+                with SecretClient(vault_url=self.vault, credential=self.credential,
+                                  connection_timeout=5, read_timeout=10, retry_total=0) as client:
+                    secret = client.get_secret(self.name)
                 expires = secret.properties.expires_on
                 if (not secret.properties.enabled or expires is None
                         or expires <= datetime.now(timezone.utc)
@@ -119,9 +112,9 @@ def validate_model_url(endpoint):
         raise ValueError('Model endpoint must be an HTTPS URL without credentials or query')
 
 
-def model_client(credential, endpoint=None, *, timeout=None, capability=None):
+def model_client(credential, endpoint=None, *, timeout=None):
     """Use exactly the selected inference connection; never retry through another route."""
-    settings = model_settings(capability=capability)
+    settings = model_settings()
     endpoint = (settings['MODEL_BASE_URL']
                 or (endpoint or os.environ['FOUNDRY_PROJECT_ENDPOINT']).rstrip('/') + '/openai/v1/')
     validate_model_url(endpoint)
