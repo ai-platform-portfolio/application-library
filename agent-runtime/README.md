@@ -1,5 +1,22 @@
 # Foundry agent runtime capabilities
 
+Install the base wheel for the reusable OpenAI client (including ordinary Chat
+Completions consumers); it does not install Foundry hosting SDKs. Hosted agents
+install the same distribution with its `[foundry]` extra. Version0.1.7 keeps the
+existing direct connection interface and adds governed gateway paths.
+
+`model_client(credential, timeout=45)` returns the normal OpenAI SDK client with
+zero SDK retries. Gateway API-key authentication accepts exactly one of
+`MODEL_API_KEY` or `MODEL_API_KEY_SECRET_URI`. The latter is a versionless
+`https://<vault>.vault.azure.net/secrets/<name>` reference; the native Key Vault
+client reads a finite, enabled key and caches it for at most five minutes, refreshing
+before expiry. Read failure fails the request instead of serving a stale key or
+switching endpoints. Runtime identities require access only to their own secrets.
+
+These capabilities do not enforce provider access on their own. Backend denial,
+credential issuance, budgets, networking and live hosted acceptance are separate
+deployment requirements. Keys and document/note payloads must not enter logs.
+
 Reusable Python capabilities for agents hosted in Microsoft Foundry. The consumer
 owns instructions, tool allowlists, diagnostic validation, reviewed knowledge,
 evaluation cases and delivery composition. This package does not deploy an agent,

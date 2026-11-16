@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import time
+from datetime import datetime, timezone
+from threading import Lock
 from urllib.parse import urlsplit
 
 from azure.identity import get_bearer_token_provider
@@ -36,6 +38,7 @@ def model_settings(model=None):
     base = os.getenv('MODEL_BASE_URL', '')
     scope = os.getenv('MODEL_TOKEN_SCOPE') or 'https://ai.azure.com/.default'
     key = os.getenv('MODEL_API_KEY', '')
+    secret = os.getenv('MODEL_API_KEY_SECRET_URI', '')
     deployment = os.getenv('MODEL_DEPLOYMENT_NAME', model)
     if mode not in {'foundry', 'gateway'} or auth not in {'entra', 'api_key'}:
         raise ValueError('Declare foundry/gateway mode and entra/api_key authentication')
@@ -47,15 +50,59 @@ def model_settings(model=None):
         raise ValueError('Model deployment must be non-empty without surrounding whitespace')
     if base:
         validate_model_url(base)
-    if auth == 'api_key' and (not key or any(c.isspace() for c in key)):
-        raise ValueError('API-key authentication requires MODEL_API_KEY')
+    if auth == 'api_key':
+        if bool(key) == bool(secret) or any(c.isspace() for c in key):
+            raise ValueError('API-key authentication requires exactly one inline key or secret URI')
+        if secret:
+            secret_reference(secret)
     if mode == 'gateway' and auth == 'entra' and not os.getenv('MODEL_TOKEN_SCOPE'):
         raise ValueError('Gateway Entra authentication requires an explicit token scope')
     if auth == 'entra' and (not scope.startswith(('https://', 'api://')) or not scope.endswith('/.default') or any(c.isspace() for c in scope)):
         raise ValueError('Model token scope must be a declared HTTPS or api:// default scope')
     return {'MODEL_CONNECTION_MODE': mode, 'MODEL_AUTH_METHOD': auth,
             'MODEL_BASE_URL': base, 'MODEL_TOKEN_SCOPE': scope,
-            'MODEL_DEPLOYMENT_NAME': deployment, 'MODEL_API_KEY': key if auth == 'api_key' else ''}
+            'MODEL_DEPLOYMENT_NAME': deployment, 'MODEL_API_KEY': key if auth == 'api_key' else '',
+            'MODEL_API_KEY_SECRET_URI': secret if auth == 'api_key' else ''}
+
+
+def secret_reference(uri):
+    """Only versionless Key Vault secret references may rotate in place."""
+    validate_model_url(uri)
+    url = urlsplit(uri)
+    parts = url.path.split('/')
+    if (url.port is not None or not url.hostname.endswith('.vault.azure.net')
+            or len(parts) != 3 or parts[1] != 'secrets'
+            or not parts[2] or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-' for c in parts[2])):
+        raise ValueError('Declare a versionless Azure Key Vault secret URI')
+    return f'https://{url.hostname}', parts[2]
+
+
+class SecretKey:
+    """Refresh a finite key before expiry; never serve a stale key after failure."""
+    def __init__(self, credential, uri):
+        self.vault, self.name = secret_reference(uri)
+        self.credential = credential
+        self.lock = Lock()
+        self.value, self.refresh_at = None, 0
+
+    def __call__(self):
+        with self.lock:
+            now = time.time()
+            if now >= self.refresh_at:
+                from azure.keyvault.secrets import SecretClient
+                with SecretClient(vault_url=self.vault, credential=self.credential,
+                                  connection_timeout=5, read_timeout=10, retry_total=0) as client:
+                    secret = client.get_secret(self.name)
+                expires = secret.properties.expires_on
+                if (not secret.properties.enabled or expires is None
+                        or expires <= datetime.now(timezone.utc)
+                        or not secret.value or any(c.isspace() for c in secret.value)):
+                    raise ValueError('Gateway credential is disabled, expired or invalid')
+                self.value = secret.value
+                self.refresh_at = min(now + 300, expires.timestamp() - 30)
+                if self.refresh_at <= now:
+                    raise ValueError('Gateway credential is too close to expiry')
+            return self.value
 
 
 def validate_model_url(endpoint):
@@ -65,15 +112,18 @@ def validate_model_url(endpoint):
         raise ValueError('Model endpoint must be an HTTPS URL without credentials or query')
 
 
-def model_client(credential, endpoint=None):
+def model_client(credential, endpoint=None, *, timeout=None):
     """Use exactly the selected inference connection; never retry through another route."""
     settings = model_settings()
     endpoint = (settings['MODEL_BASE_URL']
                 or (endpoint or os.environ['FOUNDRY_PROJECT_ENDPOINT']).rstrip('/') + '/openai/v1/')
     validate_model_url(endpoint)
     token = (get_bearer_token_provider(credential, settings['MODEL_TOKEN_SCOPE'])
-             if settings['MODEL_AUTH_METHOD'] == 'entra' else settings['MODEL_API_KEY'])
-    return OpenAI(base_url=endpoint.rstrip('/') + '/', api_key=token, max_retries=0)
+             if settings['MODEL_AUTH_METHOD'] == 'entra' else
+             SecretKey(credential, settings['MODEL_API_KEY_SECRET_URI'])
+             if settings['MODEL_API_KEY_SECRET_URI'] else settings['MODEL_API_KEY'])
+    options = {} if timeout is None else {'timeout': timeout}
+    return OpenAI(base_url=endpoint.rstrip('/') + '/', api_key=token, max_retries=0, **options)
 
 
 def run(incident, config, client, tools, historical_context=None):

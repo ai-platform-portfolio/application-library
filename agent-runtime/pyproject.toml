@@ -4,18 +4,23 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "portfolio-agent-runtime"
-version = "0.1.6"
+version = "0.1.7"
 description = "Foundry durable context and bounded, supervised coding capabilities"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-  "azure-ai-agentserver-core>=2.3.0,<3",
-  "azure-ai-projects>=2.11.0,<3",
   "azure-identity>=1.25,<2",
+  "azure-keyvault-secrets>=4.10,<5",
   "httpx>=0.28,<1",
   "openai>=3.0,<4",
   "PyYAML>=6.0.3,<7",
   "opentelemetry-api>=1.45.2,<2",
+]
+
+[project.optional-dependencies]
+foundry = [
+  "azure-ai-agentserver-core>=2.3.0,<3",
+  "azure-ai-projects>=2.11.0,<3",
 ]
 
 [tool.setuptools.packages.find]

@@ -55,7 +55,9 @@ jobs:
 
             environment="$RUNNER_TEMP/python-$package"
             python3 -m venv "$environment"
-            "$environment/bin/pip" install --only-binary=:all: "./$package"
+            extras=''
+            if [[ "$package" == agent-runtime ]]; then extras='[foundry]'; fi
+            "$environment/bin/pip" install --only-binary=:all: "./$package$extras"
             if [[ -d "$package/tests" ]]; then
               "$environment/bin/python" -m unittest discover -s "$package/tests" -v
             fi
