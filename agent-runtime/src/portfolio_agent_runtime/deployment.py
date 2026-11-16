@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import ssl
+import tempfile
 from urllib.parse import urlsplit
 
 from azure.ai.projects import AIProjectClient
@@ -12,10 +13,12 @@ from azure.identity import DefaultAzureCredential
 import yaml
 
 from .knowledge import ensure_memory, publish
+from .agent import model_settings
 
 
 def configure(path):
     config = yaml.safe_load(Path(path).read_text())
+    connection = model_settings(config['model'])
     memory = config.get('memory', {})
     environment = os.environ['AZURE_ENV_NAME']
     manifest = {}
@@ -30,7 +33,7 @@ def configure(path):
         with DefaultAzureCredential() as credential, AIProjectClient(
                 endpoint=os.environ['FOUNDRY_PROJECT_ENDPOINT'], credential=credential,
                 connection_timeout=5, read_timeout=15, retry_total=0) as project:
-            ensure_memory(project, memory_name, config['model'], memory.get('embedding_model', 'embedding'),
+            ensure_memory(project, memory_name, memory.get('chat_model', config['model']), memory.get('embedding_model', 'embedding'),
                           memory.get('retention_days', 30))
             with project.get_openai_client() as openai:
                 manifest = publish(project, openai, directory, environment, revision, repository, source_path)
@@ -40,8 +43,7 @@ def configure(path):
         record.write_text(json.dumps(manifest, indent=2))
     values = {'MEMORY_STORE_NAME': memory_name,
               'KNOWLEDGE_MANIFEST_JSON': json.dumps(manifest, separators=(',', ':')),
-              'MODEL_BASE_URL': os.getenv('MODEL_BASE_URL') or '',
-              'MODEL_TOKEN_SCOPE': os.getenv('MODEL_TOKEN_SCOPE') or 'https://ai.azure.com/.default',
+              **connection,
               'METRICS_URL': os.getenv('METRICS_URL') or '',
               'METRICS_TOKEN_SCOPE': os.getenv('METRICS_TOKEN_SCOPE') or '',
               'AGENT_DIAGNOSTICS_BACKEND': os.getenv('AGENT_DIAGNOSTICS_BACKEND') or 'provided'}
@@ -58,8 +60,13 @@ def configure(path):
         values.update({key: '' for key in keys})
     else:
         raise ValueError('Diagnostics backend must be provided or kubernetes')
-    subprocess.run(['azd', 'env', 'set', *[f'{key}={value}' for key, value in values.items()],
-                    '--environment', environment, '--no-prompt'], check=True, timeout=30)
+    # Native --file keeps credentials out of process arguments. The temporary file
+    # is owner-only and removed even on failure; azd's ignored environment is local.
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.env') as variables:
+        variables.write(''.join(f'{key}={json.dumps(value)}\n' for key, value in values.items()))
+        variables.flush()
+        subprocess.run(['azd', 'env', 'set', '--file', variables.name,
+                        '--environment', environment, '--no-prompt'], check=True, timeout=30)
 
 
 if __name__ == '__main__':

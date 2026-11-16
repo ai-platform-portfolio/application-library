@@ -17,6 +17,38 @@ create infrastructure or run an AKS worker.
 | `deployment.py` | Native azd hook for reviewed knowledge, memory definition and explicit optional diagnostic inputs. |
 | `coding.py` | Exact-base fetch, bounded proposal, validation binding and draft-only GitHub publication. The caller supplies execution and credential boundaries. |
 
+## Inference connection
+
+The existing OpenAI Responses client uses these environment inputs. Direct Foundry
+remains the default; no provider adapters or automatic route fallback are installed.
+
+| Input | Contract |
+| --- | --- |
+| `MODEL_CONNECTION_MODE` | `foundry` (default) or `gateway`. |
+| `MODEL_AUTH_METHOD` | `entra` (default) or `api_key`; direct Foundry requires Entra. |
+| `MODEL_BASE_URL` | Exact HTTPS inference base URL. Direct mode derives `<project>/openai/v1/` when absent; gateway mode requires it. Existing direct-mode overrides remain supported. |
+| `MODEL_TOKEN_SCOPE` | Entra audience; defaults to `https://ai.azure.com/.default` only for direct mode. Gateway Entra requires an explicit scope. |
+| `MODEL_DEPLOYMENT_NAME` | Model/deployment override. The deployment hook otherwise uses the consumer's existing `model`; gateway runtime requires a declared model. |
+| `MODEL_API_KEY` | Required for API-key authentication; sent as an OpenAI-compatible bearer key, never as an Entra token. |
+
+Gateway mode requires explicit endpoint, authentication method and model. Missing
+credentials and invalid settings fail before creating a client. Upstream failures
+propagate with SDK retries disabled; the client never constructs a second Foundry
+route. This is configuration readiness, not a gateway integration or bypass control.
+
+The native deployment hook validates inference settings before publishing knowledge
+or configuring memory. It uses azd's owner-only temporary `--file` input so credentials
+are absent from process arguments; the file is deleted on success or failure. azd
+stores resolved values in its ignored local `.azure` environment. Never upload that
+directory or include credentials in logs, release records or images. No key is
+created by this package. Secure key issuance, rotation/revocation and hosted secret
+delivery remain requirements of a later gateway deployment.
+
+Inference settings do not redirect Foundry hosting, state, memory or retrieval.
+`memory.chat_model` selects native memory processing independently; its compatibility
+default remains the consumer's `model`, never `MODEL_DEPLOYMENT_NAME`. The consumer
+should declare `memory.chat_model` explicitly before changing inference models.
+
 ## Durable context
 
 The hosted server opens `user_context(agent, project, memory_store,
