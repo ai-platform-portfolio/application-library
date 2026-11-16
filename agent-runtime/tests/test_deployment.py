@@ -11,6 +11,15 @@ from portfolio_agent_runtime.deployment import configure
 
 
 class DeploymentTests(unittest.TestCase):
+    def test_declared_gateway_workload_rejects_direct_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'agent.yaml'
+            config.write_text('model: chat\nconnection_mode: gateway\nmemory:\n  enabled: false\n')
+            with patch.dict(os.environ, {'AZURE_ENV_NAME': 'example'}, clear=True), patch(
+                    'portfolio_agent_runtime.deployment.subprocess.run') as command, self.assertRaises(ValueError):
+                configure(config)
+            command.assert_not_called()
+
     def test_gateway_publication_never_creates_managed_memory_or_vector_store(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -22,6 +31,8 @@ class DeploymentTests(unittest.TestCase):
                    'MODEL_AUTH_METHOD': 'api_key', 'MODEL_BASE_URL': 'https://gateway.test/v1',
                    'MODEL_DEPLOYMENT_NAME': 'reasoning',
                    'MODEL_API_KEY_SECRET_URI': 'https://test.vault.azure.net/secrets/reasoning',
+                   'EMBEDDING_MODEL_DEPLOYMENT_NAME': 'embedding', 'EMBEDDING_MODEL_VERSION': 'embedding-version',
+                   'EMBEDDING_MODEL_API_KEY_SECRET_URI': 'https://test.vault.azure.net/secrets/embedding',
                    'GITHUB_WORKSPACE': directory, 'GITHUB_REPOSITORY': 'org/repo',
                    'SOURCE_REVISION': 'a' * 40, 'RUNNER_TEMP': directory}
             previous = Path.cwd()
