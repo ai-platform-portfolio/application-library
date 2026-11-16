@@ -12,7 +12,7 @@ from azure.ai.projects import AIProjectClient
 from azure.identity import DefaultAzureCredential
 import yaml
 
-from .knowledge import ensure_memory, publish
+from .knowledge import ensure_memory, publish, gateway_manifest
 from .agent import model_settings
 
 
@@ -29,14 +29,18 @@ def configure(path):
             raise ValueError('Knowledge must be inside the agent project')
         source_path = directory.resolve().relative_to(Path(os.environ['GITHUB_WORKSPACE']).resolve()).as_posix()
         repository, revision = os.environ['GITHUB_REPOSITORY'], os.environ['SOURCE_REVISION']
-        memory_name = environment + '-memory'
-        with DefaultAzureCredential() as credential, AIProjectClient(
+        if connection['MODEL_CONNECTION_MODE'] == 'gateway':
+            memory_name = os.getenv('LEGACY_MEMORY_STORE_NAME', '')
+            manifest = gateway_manifest(directory, environment, revision, repository, source_path)
+        else:
+            memory_name = environment + '-memory'
+            with DefaultAzureCredential() as credential, AIProjectClient(
                 endpoint=os.environ['FOUNDRY_PROJECT_ENDPOINT'], credential=credential,
                 connection_timeout=5, read_timeout=15, retry_total=0) as project:
-            ensure_memory(project, memory_name, memory.get('chat_model', config['model']), memory.get('embedding_model', 'embedding'),
+                ensure_memory(project, memory_name, memory.get('chat_model', config['model']), memory.get('embedding_model', 'embedding'),
                           memory.get('retention_days', 30))
-            with project.get_openai_client() as openai:
-                manifest = publish(project, openai, directory, environment, revision, repository, source_path)
+                with project.get_openai_client() as openai:
+                    manifest = publish(project, openai, directory, environment, revision, repository, source_path)
         # The caller uploads this with its existing release/evaluation artifacts.
         record = Path(os.environ['RUNNER_TEMP']) / 'acceptance' / 'knowledge.json'
         record.parent.mkdir(parents=True, exist_ok=True)

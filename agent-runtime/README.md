@@ -1,5 +1,42 @@
 # Foundry agent runtime capabilities
 
+Install the base wheel for the reusable OpenAI client (including ordinary Chat
+Completions consumers); it does not install Foundry hosting SDKs. Hosted agents
+install the same distribution with its `[foundry]` extra. Version0.1.7 keeps the
+existing direct connection interface and adds governed gateway paths.
+
+`model_client(credential, timeout=45)` returns the normal OpenAI SDK client with
+zero SDK retries. Gateway API-key authentication accepts exactly one of
+`MODEL_API_KEY` or `MODEL_API_KEY_SECRET_URI`. The latter is a versionless
+`https://<vault>.vault.azure.net/secrets/<name>` reference; the native Key Vault
+client reads a finite, enabled key and caches it for at most five minutes, refreshing
+before expiry. Read failure fails the request instead of serving a stale key or
+switching endpoints. Runtime identities require access only to their own secrets.
+
+Separate `coding` and `embedding` capabilities use `CODING_MODEL_*` and
+`EMBEDDING_MODEL_*` model/key inputs with the selected shared gateway endpoint.
+Missing capability credentials never borrow another capability's key.
+
+For gateway-mode durable context, pass the explicit `(embedding_client, alias,
+pinned_version)` tuple to `hosting.invoke`. Approved notes use native isolated
+JSON state,30day retention, a100active-note admission bound and top3semantic
+recall through gateway embeddings. A15second deadline bounds context work;
+over-capacity or incompatible vector versions fail explicitly. Checkpoint and
+event stores retain their existing ownership. `gateway_manifest` records reviewed
+image corpus provenance without native vector ingestion; `gateway_query` caches
+versioned public runbook embeddings in a separate native state store.
+
+Existing direct-mode managed memory remains supported for consumers that have
+not cut over. Gateway mode must not invoke that processing path. Legacy SRE notes
+may be read/listed/deleted without inference only when `LEGACY_MEMORY_STORE_NAME`
+and a fixed `LEGACY_MEMORY_UNTIL` deadline are declared (maximum30days); approval
+attribution, IDs and original expiry are preserved. No legacy search/extraction
+or automatic migration/retention extension occurs.
+
+These capabilities do not enforce provider access on their own. Backend denial,
+credential issuance, budgets, networking and live hosted acceptance are separate
+deployment requirements. Keys and document/note payloads must not enter logs.
+
 Reusable Python capabilities for agents hosted in Microsoft Foundry. The consumer
 owns instructions, tool allowlists, diagnostic validation, reviewed knowledge,
 evaluation cases and delivery composition. This package does not deploy an agent,

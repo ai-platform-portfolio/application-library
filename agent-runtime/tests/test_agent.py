@@ -1,15 +1,52 @@
 """Inference connection selection and failure behavior without cloud calls."""
 import os
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
 import httpx
 from openai import AuthenticationError, OpenAI
 
-from portfolio_agent_runtime.agent import model_client, model_settings
+from portfolio_agent_runtime.agent import model_client, model_settings, SecretKey
 
 
 class ConnectionTests(unittest.TestCase):
+    def test_secret_refresh_expiry_failure_and_explicit_timeout(self):
+        env = {**self.gateway(), 'MODEL_API_KEY': '',
+               'MODEL_API_KEY_SECRET_URI': 'https://test.vault.azure.net/secrets/documents'}
+        now = datetime.now(timezone.utc)
+        def secret(value, expiry=now + timedelta(hours=1)):
+            return SimpleNamespace(value=value, properties=SimpleNamespace(enabled=True, expires_on=expiry))
+        with patch.dict(os.environ, env, clear=True), patch('azure.keyvault.secrets.SecretClient') as factory, patch(
+                'portfolio_agent_runtime.agent.OpenAI') as openai:
+            factory.return_value.get_secret.side_effect = [secret('key-one'), secret('key-two'), RuntimeError('unavailable')]
+            model_client(Mock(), timeout=45)
+            self.assertEqual(openai.call_args.kwargs['timeout'], 45)
+            key = openai.call_args.kwargs['api_key']
+            self.assertEqual(key(), 'key-one')
+            self.assertEqual(key(), 'key-one')
+            key.refresh_at = 0
+            self.assertEqual(key(), 'key-two')
+            key.refresh_at = 0
+            with self.assertRaises(RuntimeError):
+                key()
+            factory.return_value.get_secret.side_effect = None
+            factory.return_value.get_secret.return_value = secret('expired', now - timedelta(seconds=1))
+            with self.assertRaises(ValueError):
+                key()
+
+    def test_secret_reference_is_exclusive_versionless_and_capability_scoped(self):
+        env = {**self.gateway(), 'MODEL_API_KEY_SECRET_URI': 'https://test.vault.azure.net/secrets/test'}
+        with patch.dict(os.environ, env, clear=True), self.assertRaises(ValueError):
+            model_settings()
+        for uri in ['https://evil.test/secrets/test', 'https://test.vault.azure.net/secrets/test/version',
+                    'https://test.vault.azure.net:443/secrets/test', 'https://test.vault.azure.net/secrets/a%2Fb']:
+            with patch.dict(os.environ, {**env, 'MODEL_API_KEY': '', 'MODEL_API_KEY_SECRET_URI': uri}, clear=True), self.assertRaises(ValueError):
+                model_settings()
+        with patch.dict(os.environ, self.gateway(), clear=True), self.assertRaises(ValueError):
+            model_settings(capability='embedding')
+
     def test_direct_foundry_keeps_project_derivation_and_token_refresh(self):
         credential = Mock()
         with patch.dict(os.environ, {}, clear=True), patch(

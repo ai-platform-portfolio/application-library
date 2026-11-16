@@ -5,7 +5,7 @@ from uuid import uuid4
 from .context import bounded, knowledge_query, user_context
 
 
-async def invoke(payload, investigate, *, agent, project, memory_store, retention_days=30, knowledge=None):
+async def invoke(payload, investigate, *, agent, project, memory_store, retention_days=30, knowledge=None, embedding=None):
     """Replay fixtures bypass this entry point in the caller; reject them defensively."""
     if not isinstance(payload, dict) or 'evidence' in payload:
         raise ValueError('Persistent invocations cannot contain recorded evaluation evidence')
@@ -20,7 +20,8 @@ async def invoke(payload, investigate, *, agent, project, memory_store, retentio
     }
     if operation not in fields or not payload.keys() <= fields[operation]:
         raise ValueError('Unsupported persistent operation or fields')
-    async with user_context(agent, project, memory_store, retention_days) as context:
+    options = {'embedding': embedding} if embedding is not None else {}
+    async with user_context(agent, project, memory_store, retention_days, **options) as context:
         if operation == 'remember':
             return await context.remember(payload['content'], payload['review'])
         if operation == 'recall':
@@ -37,8 +38,14 @@ async def invoke(payload, investigate, *, agent, project, memory_store, retentio
         query = incident['summary'][:1024]
         historical = {'memories': await context.recall(query)}
         if knowledge is not None:
-            historical['knowledge'] = await asyncio.to_thread(
-                knowledge_query, project, knowledge['vector_store'], query, knowledge['sources'])
+            if knowledge.get('mode') == 'gateway':
+                from .knowledge import gateway_query
+                historical['knowledge'] = await gateway_query(knowledge, query, embedding)
+            else:
+                if embedding is not None:
+                    raise ValueError('Gateway context cannot use native vector search')
+                historical['knowledge'] = await asyncio.to_thread(
+                    knowledge_query, project, knowledge['vector_store'], query, knowledge['sources'])
         result = await asyncio.to_thread(investigate, {'incident': incident}, historical)
         # The application validates current tool evidence before this call returns.
         # Historical context is returned separately; it is never a diagnostic tool.

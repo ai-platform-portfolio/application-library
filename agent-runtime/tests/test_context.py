@@ -11,12 +11,73 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from azure.ai.agentserver.core import FoundryAgentRequestContext, get_request_context, set_request_context, reset_request_context
 from openai.types.vector_store_search_response import VectorStoreSearchResponse
-from portfolio_agent_runtime.context import Context, bounded, knowledge_query, user_context
+from portfolio_agent_runtime.context import Context, GatewayContext, bounded, knowledge_query, user_context
 from portfolio_agent_runtime.hosting import invoke
 from portfolio_agent_runtime.knowledge import corpus, ensure_memory
 
 
 class ContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_gateway_notes_preserve_approval_capacity_expiry_and_checkpoint_separation(self):
+        import time
+        records = {}
+        async def create(key, value, **options):
+            records[key] = SimpleNamespace(value=value, tags=options.get('tags'), etag='one')
+            return SimpleNamespace(etag='one')
+        async def get(key):
+            return records.get(key)
+        async def listing(**options):
+            return SimpleNamespace(keys=[SimpleNamespace(key=key) for key, item in records.items()
+                                         if item.tags == {'kind': 'approved-note'}], has_more=False)
+        async def delete(key):
+            records.pop(key, None)
+        state = Mock(create_item=AsyncMock(side_effect=create), get_item=AsyncMock(side_effect=get),
+                     list_keys=AsyncMock(side_effect=listing), set_item=AsyncMock(),
+                     delete_item=AsyncMock(side_effect=delete))
+        client = Mock()
+        client.embeddings.create.return_value = SimpleNamespace(data=[SimpleNamespace(embedding=[1.0, 0.0])])
+        native = Mock()
+        context = GatewayContext(state, native, '', 'trusted', embedding=(client, 'embedding', 'version-one'))
+        with self.assertRaises(ValueError):
+            await context.remember('A sufficiently long reviewed note', {'approved': False, 'url': 'https://review.test/1'})
+        note = await context.remember('A sufficiently long reviewed note', {'approved': True, 'url': 'https://review.test/1'})
+        hits = await context.recall('reviewed note')
+        self.assertEqual(hits[0]['id'], note['id'])
+        native.create_memory.assert_not_called()
+        native.search_memories.assert_not_called()
+        records[note['id']].value['embedding_version'] = 'different'
+        with self.assertRaises(ValueError):
+            await context.recall('reviewed note')
+        records[note['id']].value['expires_at'] = time.time() - 1
+        self.assertEqual(await context.recall('reviewed note'), [])
+        records['investigation-one'] = SimpleNamespace(value={'checkpoint': True}, tags=None)
+        with self.assertRaises(ValueError):
+            await context.forget('investigation-one')
+        await context.forget(note['id'])
+        self.assertNotIn(note['id'], records)
+        self.assertIn('investigation-one', records)
+        context.notes = AsyncMock(return_value=[{}] * 100)
+        before = client.embeddings.create.call_count
+        with self.assertRaises(ValueError):
+            await context.remember('Another sufficiently long reviewed note', {'approved': True, 'url': 'https://review.test/2'})
+        self.assertEqual(client.embeddings.create.call_count, before)
+
+    async def test_gateway_legacy_requires_fixed_deadline_and_never_searches(self):
+        from datetime import timedelta
+        native = Mock()
+        now = datetime.now(timezone.utc)
+        native.list_memories.return_value = [SimpleNamespace(scope='trusted', memory_id='legacy-one', updated_at=now,
+            content=json.dumps({'content': 'An explicitly reviewed old note', 'review': 'https://review.test/old'}))]
+        context = GatewayContext(Mock(), native, 'legacy-store', 'trusted', embedding=(Mock(), 'embedding', 'v1'))
+        with patch.dict(os.environ, {}, clear=True), self.assertRaises(ValueError):
+            await context.legacy()
+        with patch.dict(os.environ, {'LEGACY_MEMORY_UNTIL': (now + timedelta(days=10)).isoformat()}):
+            notes = await context.legacy()
+            self.assertEqual(notes[0]['id'], 'legacy-one')
+            native.list_memories.return_value[0].scope = 'another-user'
+            with self.assertRaises(ValueError):
+                await context.legacy()
+        native.search_memories.assert_not_called()
+
     async def test_context_requires_hosted_authenticated_identity_and_native_isolation(self):
         factory = AsyncMock()
         with patch('portfolio_agent_runtime.context.FoundryStateStore.get_or_create', factory):
