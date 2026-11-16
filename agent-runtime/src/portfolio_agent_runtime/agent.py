@@ -31,15 +31,18 @@ def load_config(config_path):
     return config
 
 
-def model_settings(model=None):
+def model_settings(model=None, *, capability="default"):
     """Validate inference intent without opening a client or changing Foundry services."""
+    if capability not in {'default', 'coding', 'embedding'}:
+        raise ValueError('Unknown inference capability')
+    prefix = '' if capability == 'default' else capability.upper() + '_'
     mode = os.getenv('MODEL_CONNECTION_MODE', 'foundry')
     auth = os.getenv('MODEL_AUTH_METHOD', 'entra')
     base = os.getenv('MODEL_BASE_URL', '')
     scope = os.getenv('MODEL_TOKEN_SCOPE') or 'https://ai.azure.com/.default'
-    key = os.getenv('MODEL_API_KEY', '')
-    secret = os.getenv('MODEL_API_KEY_SECRET_URI', '')
-    deployment = os.getenv('MODEL_DEPLOYMENT_NAME', model)
+    key = os.getenv(prefix + 'MODEL_API_KEY', '')
+    secret = os.getenv(prefix + 'MODEL_API_KEY_SECRET_URI', '')
+    deployment = os.getenv(prefix + 'MODEL_DEPLOYMENT_NAME', model)
     if mode not in {'foundry', 'gateway'} or auth not in {'entra', 'api_key'}:
         raise ValueError('Declare foundry/gateway mode and entra/api_key authentication')
     if mode == 'foundry' and auth != 'entra':
@@ -112,9 +115,9 @@ def validate_model_url(endpoint):
         raise ValueError('Model endpoint must be an HTTPS URL without credentials or query')
 
 
-def model_client(credential, endpoint=None, *, timeout=None):
+def model_client(credential, endpoint=None, *, timeout=None, capability="default"):
     """Use exactly the selected inference connection; never retry through another route."""
-    settings = model_settings()
+    settings = model_settings(capability=capability)
     endpoint = (settings['MODEL_BASE_URL']
                 or (endpoint or os.environ['FOUNDRY_PROJECT_ENDPOINT']).rstrip('/') + '/openai/v1/')
     validate_model_url(endpoint)
@@ -223,3 +226,21 @@ def run(incident, config, client, tools, historical_context=None):
             conversation.append({'type': 'function_call_output', 'call_id': call.call_id,
                                  'output': serialized})
         raise RuntimeError('Model-request budget exhausted')
+
+
+def embeddings(client, texts):
+    """Every context embedding uses the scoped gateway capability; no native fallback."""
+    import math
+    settings = model_settings(capability='embedding')
+    if settings['MODEL_CONNECTION_MODE'] != 'gateway' or not 1 <= len(texts) <= 101:
+        raise ValueError('Context embeddings require the gateway and a bounded batch')
+    if any(not isinstance(t, str) or not t or len(t.encode()) > 8192 for t in texts):
+        raise ValueError('Embedding input exceeds its byte budget')
+    response = client.embeddings.create(model=settings['MODEL_DEPLOYMENT_NAME'], input=texts, dimensions=256)
+    rows = sorted(response.data, key=lambda row: row.index)
+    if [row.index for row in rows] != list(range(len(texts))):
+        raise ValueError('Embedding response does not match its inputs')
+    vectors = [row.embedding for row in rows]
+    if any(len(v) != 256 or any(not math.isfinite(x) for x in v) or not any(v) for v in vectors):
+        raise ValueError('Invalid embedding dimensions or values')
+    return vectors

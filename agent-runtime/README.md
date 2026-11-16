@@ -1,158 +1,77 @@
 # Foundry agent runtime capabilities
 
-Install the base wheel for the reusable OpenAI client (including ordinary Chat
-Completions consumers); it does not install Foundry hosting SDKs. Hosted agents
-install the same distribution with its `[foundry]` extra. Version0.1.7 keeps the
-existing direct connection interface and adds governed gateway paths.
+The lightweight base package supplies the OpenAI-compatible model client. Hosted
+consumers install `[foundry]` as well. This source proposes runtime0.1.8; publication
+and live cutover are separate gates. Consumers pin the actual released wheel/hash.
 
-`model_client(credential, timeout=45)` returns the normal OpenAI SDK client with
-zero SDK retries. Gateway API-key authentication accepts exactly one of
-`MODEL_API_KEY` or `MODEL_API_KEY_SECRET_URI`. The latter is a versionless
-`https://<vault>.vault.azure.net/secrets/<name>` reference; the native Key Vault
-client reads a finite, enabled key and caches it for at most five minutes, refreshing
-before expiry. Read failure fails the request instead of serving a stale key or
-switching endpoints. Runtime identities require access only to their own secrets.
+## Model connections
 
-These capabilities do not enforce provider access on their own. Backend denial,
-credential issuance, budgets, networking and live hosted acceptance are separate
-deployment requirements. Keys and document/note payloads must not enter logs.
+`model_client(credential, capability="default", timeout=45)` returns the normal
+OpenAI client with zero retries and no alternate route. `coding` and `embedding`
+select their own credentials/models through `CODING_` and `EMBEDDING_` environment
+prefixes. They cannot borrow the default key. Endpoint/mode/authentication are common.
 
-Reusable Python capabilities for agents hosted in Microsoft Foundry. The consumer
-owns instructions, tool allowlists, diagnostic validation, reviewed knowledge,
-evaluation cases and delivery composition. This package does not deploy an agent,
-create infrastructure or run an AKS worker.
+Direct generation retains `MODEL_CONNECTION_MODE=foundry` with Entra authentication.
+Gateway mode requires `MODEL_CONNECTION_MODE=gateway`, `MODEL_AUTH_METHOD=api_key`,
+`MODEL_BASE_URL`, and each selected capability's `MODEL_DEPLOYMENT_NAME` and
+`MODEL_API_KEY_SECRET_URI`. Inline `MODEL_API_KEY` remains supported for existing
+base-client consumers, mutually exclusive with a secret reference.
 
-| Component | Responsibility |
-| --- | --- |
-| `agent.py` | Shared model injection and bounded model/tool loop; the consumer supplies instructions and tools. |
-| `evaluation.py` | Dataset/reference separation and six contract checks; no model or state operations. |
-| `context.py` | Native per-user state, explicit reviewed memory writes, bounded recall and forget; direct searches of the publication-pinned vector store. |
-| `knowledge.py` | Reviewed Markdown ingestion, source hashes and commit links, managed-memory definition, revision-specific toolbox publication and ordered cleanup. |
-| `intake.py` | Native per-caller Event UID deduplication, retry leases and a two-per-minute bound; fixed incident text. |
-| `hosting.py` | Composes explicit memory commands and the investigator without mixing history with current evidence. |
-| `handoff.py` | CLI bindings for isolated CI fetch, validation and draft publication. |
-| `deployment.py` | Native azd hook for reviewed knowledge, memory definition and explicit optional diagnostic inputs. |
-| `coding.py` | Exact-base fetch, bounded proposal, validation binding and draft-only GitHub publication. The caller supplies execution and credential boundaries. |
+Versionless `https://<vault>.vault.azure.net/secrets/<name>` references resolve
+finite enabled credentials using the application's native identity. Keys are cached
+for at most five minutes and refreshed before expiry; refresh failure propagates.
+Credential creation, limits and revocation belong to the shared application chart.
+Backend authorization and live bypass-denial evidence remain deployment requirements.
 
-## Inference connection
+## Durable context and transition
 
-The existing OpenAI Responses client uses these environment inputs. Direct Foundry
-remains the default; no provider adapters or automatic route fallback are installed.
+Authenticated invocations retain the native user-isolated `agent/users-v1` state
+store, checkpoints and event deduplication. Caller JSON cannot choose the identity
+or memory scope. The SDK's local disk fallback is unavailable in the hosted path.
+Retention is1–30 days and existing store settings must match.
 
-| Input | Contract |
-| --- | --- |
-| `MODEL_CONNECTION_MODE` | `foundry` (default) or `gateway`. |
-| `MODEL_AUTH_METHOD` | `entra` (default) or `api_key`; direct Foundry requires Entra. |
-| `MODEL_BASE_URL` | Exact HTTPS inference base URL. Direct mode derives `<project>/openai/v1/` when absent; gateway mode requires it. Existing direct-mode overrides remain supported. |
-| `MODEL_TOKEN_SCOPE` | Entra audience; defaults to `https://ai.azure.com/.default` only for direct mode. Gateway Entra requires an explicit scope. |
-| `MODEL_DEPLOYMENT_NAME` | Model/deployment override. The deployment hook otherwise uses the consumer's existing `model`; gateway runtime requires a declared model. |
-| `MODEL_API_KEY` | Required for API-key authentication; sent as an OpenAI-compatible bearer key, never as an Entra token. |
+Approved notes use a bounded native JSON ledger with conditional ETag writes, a
+100-active-note capacity and logical expiry per record. Updating the ledger never
+extends another note's visible lifetime. Remember requires explicit approval and
+review attribution. Forget and checkpoint deletion remain explicit operations;
+recorded grader/fixture data cannot enter persistent context.
 
-Gateway mode requires explicit endpoint, authentication method and model. Missing
-credentials and invalid settings fail before creating a client. Upstream failures
-propagate with SDK retries disabled; the client never constructs a second Foundry
-route. This is configuration readiness, not a gateway integration or bypass control.
+All new/query embeddings go through the scoped gateway capability, using256
+validated dimensions. `EMBEDDING_MODEL_VERSION` pins the provider version alongside
+the model alias in stored notes. A model/version change requires explicit reindexing;
+existing vectors are never silently mixed. Retrieval returns at most three bounded
+notes and never turns historical text into current diagnostic evidence.
 
-The native deployment hook validates inference settings before publishing knowledge
-or configuring memory. It uses azd's owner-only temporary `--file` input so credentials
-are absent from process arguments; the file is deleted on success or failure. azd
-stores resolved values in its ignored local `.azure` environment. Never upload that
-directory or include credentials in logs, release records or images. No key is
-created by this package. Secure key issuance, rotation/revocation and hosted secret
-delivery remain requirements of a later gateway deployment.
+If `MEMORY_STORE_NAME` names the previous native memory store, the operator must
+set a fixed timezone-qualified `LEGACY_MEMORY_UNTIL` no later than30 days after
+cutover. Missing deadline blocks memory operations. The transition uses scoped
+list/delete only, retaining original reviewed envelopes, IDs and original expiry.
+It never calls managed memory creation/search, repeats legacy plaintext into new
+storage, or extends retention. Expired/unreviewed/oversized corpora are not silently
+migrated. After the deadline, legacy reads stop; retire the old resources through
+reviewed cleanup. Forget includes matching eligible legacy records.
 
-Inference settings do not redirect Foundry hosting, state, memory or retrieval.
-`memory.chat_model` selects native memory processing independently; its compatibility
-default remains the consumer's `model`, never `MODEL_DEPLOYMENT_NAME`. The consumer
-should declare `memory.chat_model` explicitly before changing inference models.
+## Reviewed runbooks and deployment
 
-## Durable context
+The predeploy hook computes a manifest from1–20 regular Markdown files, bounded
+at32KiB per file/128KiB total. It records exact repository/revision/path/hash links;
+no managed memory, vectors, toolbox or inference is provisioned by deployment.
+The consumer bundles that same directory in its image. Runtime rejects mismatched
+provenance and lazily embeds bounded chunks through its own gateway identity.
+Only reviewed public text/vectors enter `agent/runbooks-v1`, a non-user-isolated
+native cache with30-day TTL. Private notes remain in isolated state.
 
-The hosted server opens `user_context(agent, project, memory_store,
-retention_days=30)` inside the authenticated invocation. It requires Foundry's
-hosting environment and native call/user context. It never accepts user identity,
-memory scope or a delegated identity from request JSON. The state store enables
-native user isolation and verifies existing isolation/TTL before use. A stable hash of the agent name and Foundry-authenticated user identity supplies
-the managed-memory scope without another mapping resource. It stays stable across
-agent versions; callers cannot supply another scope. The scope is
-`agent-SHA256(agent + NUL + user)`, using a hyphen because the native memory API
-rejects colons. Its allowed characters are letters, digits, `_-.%+@/`, with a
-256-character limit; the generated scope stays within that limit.
+`hosting.invoke` composes note commands, runbook retrieval, investigation and
+checkpoints. The application supplies `embedding_client`, `knowledge_path`, its
+manifest and existing project identity. Source citations use deterministic file
+IDs bound to the exact publication. Public cache generations include the source
+revision, content, embedding model/version and dimensions.
 
-`checkpoint` / `resume` retain bounded investigation state, not arbitrary logs,
-credentials or hidden reasoning. `remember` is an explicit authenticated-owner
-command, outside the model's tool allowlist; it requires approved content and an
-HTTPS review reference. That URL records the owner's attribution: it does not
-verify an external review system. Generated diagnoses are never automatically
-remembered as facts. Approved free-form notes are direct `user_profile` memory
-items, retaining their content and review attribution. Procedural items require
-structured procedure content and are not used for these notes. `recall` returns
-at most three memories (8 KiB total), each with a stable ID and update time.
-Native memory IDs are opaque and may exceed 128 characters; named deletion accepts
-up to 512 URL-safe identifier characters while other identifiers remain limited to
-128. `forget` clears that user's managed-memory scope;
-`forget_investigation` separately deletes a checkpoint.
-
-Configure the memory store with `ensure_memory`, the chat deployment, embedding
-deployment and retention. Profile/automatic chat-summary extraction is disabled.
-Existing incompatible definitions fail rather than resetting users' memories.
-Native memory is preview. State expires 30 days after its last write by default;
-managed memories expire according to the store's explicit TTL. Reads do not renew
-checkpoint retention. Native stores survive container restarts and AKS outages,
-not deletion of their owning Foundry project/account.
-
-Microsoft guidance: [durable hosted state](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/agent-state-store)
-describes per-user partitioning, retention and optimistic concurrency;
-[the state-store SDK](https://learn.microsoft.com/en-us/python/api/azure-ai-agentserver-core/azure.ai.agentserver.core.storage.foundrystatestore?view=azure-python)
-defines item ETags and conditional `if_match` writes. [Managed memory](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/memory-usage)
-documents explicit scopes, retention and remember/forget operations. Managed memory
-is preview; these references describe APIs, not evidence of this consumer's live acceptance.
-
-The [hosted runtime contract](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agent-contract)
-requires the opaque call ID on outbound Foundry requests. Memory operations and
-native knowledge search use the current request context's `platform_headers()`
-per call. Only the call ID is forwarded; user IDs stay inside the container.
-Headers are never stored on shared clients. Outside a hosted request, no identity
-headers are added. State-store forwarding remains owned by its native SDK.
-
-## Reviewed knowledge
-
-`publish` takes the corpus directory, agent identity, exact commit, repository and
-repository-relative source path. Only top-level Markdown is uploaded: 20 documents,
-32 KiB each and 128 KiB total. Symlinks, recursive datasets and other file types
-are excluded. The caller must supply a reviewed knowledge directory; byte limits
-and filename filtering do not establish that arbitrary text is safe/public.
-
-Foundry files carry source paths, SHA256 hashes and immutable GitHub commit links.
-A toolbox name includes the source revision and pins its vector store. Retrying a
-completed publication checks provenance and sources before reusing it. The caller
-retains the manifest with the release record. `knowledge_query` uses the project's
-OpenAI client to search that manifest's existing vector store directly. It requests
-at most three results and returns at most 16 KiB, keeping only native result file
-IDs present in the pinned source manifest. Text mentioning a file ID cannot create
-a citation.
-The consumer must require citations before presenting retrieved facts as grounded.
-This is historical context; it cannot establish current readiness or authorize a
-coding handoff.
-
-**File-search toolboxes are project-shared.** This corpus is reviewed public
-portfolio material, not private per-user documents. User memory stays in separate
-scopes. Keep evaluator rubrics, reference answers and fixtures outside both paths;
-recorded evaluation invocations must bypass persistence and retrieval entirely.
-
-The [native search API](https://developers.openai.com/api/reference/python/resources/vector_stores/methods/search)
-documents the SDK request and result file IDs.
-Microsoft's [file-search/toolbox guidance](https://learn.microsoft.com/en-us/azure/foundry/agents/how-to/tools/file-search)
-documents ingestion, pinned vector stores and the lack of user isolation for
-hosted-agent toolboxes. The public-only corpus rule above is this application's
-response to that sharing boundary.
-
-`cleanup` checks toolbox ownership and discovers its attached files before deleting
-the toolbox, vector store and those files, in that order. It does not delete the
-shared managed-memory store or any other agent's resources. Retain a publication
-until all versions using it have been retired. Interrupted publication/cleanup
-still requires live acceptance; this package is not a claim of an atomic Azure
-transaction.
+The hook forwards public connection references through an owner-only temporary
+native azd `--file`; it is removed on success/failure. Never upload the ignored
+`.azure` directory or record keys/payloads in logs. Hosting can start before secret
+access is granted: deploy/read the native principal, reconcile chart credentials,
+then invoke and evaluate the exact candidate. CI needs no separate inference key.
 
 ## Coding boundaries
 

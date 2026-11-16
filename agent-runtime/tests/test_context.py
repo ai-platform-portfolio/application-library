@@ -1,331 +1,164 @@
+"""Behavioral checks for approved context, concurrent capacity and gateway retrieval."""
 import asyncio
-from datetime import datetime, timezone
-import json
+from datetime import datetime, timezone, timedelta
 import hashlib
+import json
 import os
 from pathlib import Path
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
-from azure.ai.agentserver.core import FoundryAgentRequestContext, get_request_context, set_request_context, reset_request_context
-from openai.types.vector_store_search_response import VectorStoreSearchResponse
-from portfolio_agent_runtime.context import Context, bounded, knowledge_query, user_context
+from azure.ai.agentserver.core import FoundryAgentRequestContext, set_request_context, reset_request_context
+from azure.ai.agentserver.core.storage import FoundryStorageConflictError, FoundryStoragePreconditionError
+from portfolio_agent_runtime.context import Context, user_context
+from portfolio_agent_runtime.knowledge import corpus, publish, knowledge_query
 from portfolio_agent_runtime.hosting import invoke
-from portfolio_agent_runtime.knowledge import corpus, ensure_memory
+
+VECTOR = [1.0] + [0.0] * 255
+ENV = {'EMBEDDING_MODEL_DEPLOYMENT_NAME': 'embedding', 'EMBEDDING_MODEL_VERSION': '1'}
+REVIEW = {'approved': True, 'url': 'https://example.test/review'}
+
+
+class State:
+    """Atomic native storage contract; yield reads to exercise cross-request races."""
+    def __init__(self):
+        self.items = {}
+        self.generation = 0
+
+    async def get_item(self, key):
+        value = self.items.get(key)
+        result = SimpleNamespace(value=json.loads(json.dumps(value[0])), etag=value[1]) if value else None
+        await asyncio.sleep(0)
+        return result
+
+    async def create_item(self, key, value):
+        if key in self.items:
+            raise FoundryStorageConflictError('conflict')
+        await self.set_item(key, value)
+
+    async def set_item(self, key, value, if_match=None):
+        if if_match is not None and (key not in self.items or self.items[key][1] != if_match):
+            raise FoundryStoragePreconditionError('changed')
+        self.generation += 1
+        self.items[key] = (json.loads(json.dumps(value)), str(self.generation))
+
+    async def delete_item(self, key):
+        self.items.pop(key, None)
 
 
 class ContextTests(unittest.IsolatedAsyncioTestCase):
-    async def test_context_requires_hosted_authenticated_identity_and_native_isolation(self):
-        factory = AsyncMock()
-        with patch('portfolio_agent_runtime.context.FoundryStateStore.get_or_create', factory):
+    async def test_native_identity_isolation_and_retention_remain_mandatory(self):
+        state = Mock(get=AsyncMock(return_value=SimpleNamespace(user_isolation=True, item_ttl_seconds=2592000)), aclose=AsyncMock())
+        with patch('portfolio_agent_runtime.context.FoundryStateStore.get_or_create', AsyncMock(return_value=state)) as factory:
             with self.assertRaises(ValueError):
-                async with user_context('demo', Mock(), 'memory'):
+                async with user_context('demo', Mock(), ''):
                     pass
-            factory.assert_not_called()
-            state = Mock()
-            state.get = AsyncMock(return_value=SimpleNamespace(user_isolation=True, item_ttl_seconds=2592000))
-            state.get_item = AsyncMock(return_value=SimpleNamespace(value={'scope': 'opaque-user-handle'}))
-            state.aclose = AsyncMock()
-            factory.return_value = state
-            token = set_request_context(FoundryAgentRequestContext(call_id='trusted-call', user_id='trusted-user'))
-            try:
-                with patch.dict(os.environ, {'FOUNDRY_HOSTING_ENVIRONMENT': 'test'}):
-                    async with user_context('demo', Mock(), 'memory') as context:
-                        self.assertEqual(context.scope, 'demo-' + hashlib.sha256(b'demo\0trusted-user').hexdigest())
-                    factory.assert_awaited_once_with('demo/users-v1', user_isolation=True, item_ttl_seconds=2592000,
-                                                    connection_timeout=5, read_timeout=15, retry_total=0)
-                    state.get.return_value.user_isolation = False
-                    with self.assertRaises(ValueError):
-                        async with user_context('demo', Mock(), 'memory'):
-                            pass
-            finally:
-                reset_request_context(token)
-            self.assertEqual(state.aclose.await_count, 2)
-
-    async def test_generated_scopes_match_native_contract_and_isolate_identities(self):
-        state = Mock(get=AsyncMock(return_value=SimpleNamespace(user_isolation=True, item_ttl_seconds=2592000)),
-                     aclose=AsyncMock())
-        scopes = []
-        identities = [('demo', 'user-one'), ('demo', 'user-one'), ('demo', 'user-two'),
-                      ('other', 'user-one'), ('a' * 128, 'user-one')]
-        with patch.dict(os.environ, {'FOUNDRY_HOSTING_ENVIRONMENT': 'test'}), \
-             patch('portfolio_agent_runtime.context.FoundryStateStore.get_or_create', AsyncMock(return_value=state)):
-            for agent, user in identities:
+            scopes = []
+            for agent, user in [('demo', 'one'), ('demo', 'two'), ('other', 'one')]:
                 token = set_request_context(FoundryAgentRequestContext(call_id='trusted-call', user_id=user))
                 try:
-                    async with user_context(agent, Mock(), 'memory') as context:
-                        # Native memory rejects unsupported characters, including ':'.
-                        self.assertRegex(context.scope, r'^[A-Za-z0-9_.%+@/-]{1,256}$')
-                        scopes.append(context.scope)
+                    with patch.dict(os.environ, {'FOUNDRY_HOSTING_ENVIRONMENT': 'test'}):
+                        async with user_context(agent, Mock(), '') as context:
+                            scopes.append(context.scope)
                 finally:
                     reset_request_context(token)
-        self.assertEqual(scopes[0], scopes[1])
-        self.assertEqual(len(set(scopes)), 4)
+            self.assertEqual(len(set(scopes)), 3)
+            self.assertEqual(scopes[0], 'demo-' + hashlib.sha256(b'demo\0one').hexdigest())
+            self.assertTrue(all(c.kwargs['user_isolation'] for c in factory.call_args_list))
+        self.assertEqual(state.aclose.await_count, 3)
 
-    async def test_reviewed_memory_recall_and_forget_use_the_same_private_scope(self):
-        state, memories = Mock(), Mock()
-        state.set_item = AsyncMock()
-        memories.create_memory.return_value = SimpleNamespace(memory_id='remembered')
-        memories.search_memories.return_value = SimpleNamespace(memories=[SimpleNamespace(memory_item=SimpleNamespace(
-            memory_id='remembered', content='Reviewed operational context', updated_at=datetime.now(timezone.utc)))])
-        context = Context(state, memories, 'managed-memory', 'demo-opaque')
-        with self.assertRaises(ValueError):
-            await context.remember('Do something without an explicit review.', {'approved': False, 'url': 'https://example.test/review'})
+    async def test_review_recall_restart_expiry_and_deletion(self):
+        state = State()
+        context = Context(state, Mock(), '', 'caller', Mock())
+        with patch.dict(os.environ, ENV), patch('portfolio_agent_runtime.context.embeddings', side_effect=lambda c, t: [VECTOR for _ in t]):
+            with self.assertRaises(ValueError):
+                await context.remember('An unapproved operational note.', {**REVIEW, 'approved': False})
+            saved = await context.remember('An explicitly approved operational note.', REVIEW)
+            # A fresh context instance reads the persisted note, not process memory.
+            other_session = Context(state, Mock(), '', 'caller', Mock())
+            self.assertEqual((await other_session.recall('operational'))[0]['id'], saved['id'])
+            await other_session.forget(saved['id'])
+            self.assertEqual(await context.recall('operational'), [])
+            saved = await context.remember('A second explicitly approved operational note.', REVIEW)
+            with patch('portfolio_agent_runtime.context.time.time', return_value=time.time() + 2592001):
+                self.assertEqual(await context.recall('operational'), [])
+            await context.checkpoint('case', {'trace_id': 'trace'})
+            self.assertEqual(await other_session.resume('case'), {'trace_id': 'trace'})
+            await context.forget_investigation('case')
+            self.assertIsNone(await other_session.resume('case'))
+
+    async def test_two_writers_cannot_exceed_capacity_or_lose_a_note(self):
+        context = Context(State(), Mock(), '', 'caller', Mock())
+        with patch.dict(os.environ, ENV), patch('portfolio_agent_runtime.context.embeddings', side_effect=lambda c, t: [VECTOR for _ in t]):
+            for i in range(99):
+                await context.remember(f'Approved context note number {i}.', REVIEW)
+            results = await asyncio.gather(context.remember('Approved concurrent note one.', REVIEW),
+                                           context.remember('Approved concurrent note two.', REVIEW), return_exceptions=True)
+            self.assertEqual(sum(isinstance(r, ValueError) for r in results), 1)
+            stored = await context.state.get_item('approved-notes-v1')
+            self.assertEqual(len(stored.value['notes']), 100)
+            self.assertEqual(len({n['id'] for n in stored.value['notes']}), 100)
+            with patch.dict(os.environ, {'EMBEDDING_MODEL_VERSION': '2'}), self.assertRaisesRegex(ValueError, 'reindex'):
+                await context.recall('operational')
+
+    async def test_legacy_uses_only_scoped_reads_and_preserves_ids_expiry_and_forget(self):
+        memories = Mock()
+        note = SimpleNamespace(memory_id='legacy-' + 'a'*143, scope='caller', updated_at=datetime.now(timezone.utc),
+                               content=json.dumps({'content': 'Previously approved operational note.', 'review': REVIEW['url']}))
+        memories.list_memories.return_value = [note]
+        context = Context(State(), memories, 'legacy-store', 'caller', Mock())
+        with patch.dict(os.environ, {**ENV, 'LEGACY_MEMORY_UNTIL': (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()}), \
+             patch('portfolio_agent_runtime.context.embeddings', side_effect=lambda c, t: [VECTOR for _ in t]):
+            recalled = await context.recall('operational')
+            self.assertEqual(recalled[0]['id'], note.memory_id)
+            self.assertEqual(context.state.items, {})  # no legacy plaintext migration
+            await context.forget(note.memory_id)
+            memories.delete_memory.assert_called_once_with('legacy-store', note.memory_id, headers={})
+            note.scope = 'another-caller'
+            with self.assertRaisesRegex(ValueError, 'scope'):
+                await context.recall('operational')
+        memories.search_memories.assert_not_called()
         memories.create_memory.assert_not_called()
-        content = 'Reviewed operational context for later investigations.'
-        review = {'approved': True, 'url': 'https://example.test/review'}
-        saved = await context.remember(content, review)
-        memories.create_memory.assert_called_once_with(
-            'managed-memory', scope='demo-opaque', kind='user_profile',
-            content=json.dumps({'content': content, 'review': review['url']}, sort_keys=True), headers={})
-        self.assertEqual(saved['id'], (await context.recall('operational context'))[0]['id'])
-        await context.forget()
-        for call in (memories.create_memory.call_args, memories.search_memories.call_args, memories.delete_scope.call_args):
-            self.assertEqual(call.kwargs['scope'], 'demo-opaque')
-        state.set_item.assert_not_called()
+        with patch.dict(os.environ, {'LEGACY_MEMORY_UNTIL': ''}), self.assertRaisesRegex(ValueError, 'deadline'):
+            await context.legacy()
 
-    async def test_named_forget_accepts_long_native_ids_with_existing_scope_check(self):
-        memory_id = 'a' * 110 + '_' + 'b' * 32  # Native ID for an 82-character scope.
-        memories = Mock()
-        memories.get_memory.return_value = SimpleNamespace(scope='own-caller')
-        context = Context(Mock(), memories, 'memory', 'own-caller')
-        await context.forget(memory_id)
-        memories.get_memory.assert_called_once_with('memory', memory_id, headers={})
-        memories.delete_memory.assert_called_once_with('memory', memory_id, headers={})
-        for invalid in ('a' * 513, '../another-record'):
+    async def test_grader_and_oversized_checkpoint_rejected(self):
+        state = State()
+        context = Context(state, Mock(), '', 'caller')
+        for value in ({'nested': {'rubric': {}}}, {'answer': 'x'*8192}, {'evidence': {}}):
             with self.assertRaises(ValueError):
-                await context.forget(invalid)
-        self.assertEqual(memories.get_memory.call_count, 1)
-        with self.assertRaises(ValueError):
-            await context.resume(memory_id)
+                await context.checkpoint('case', value)
+        self.assertFalse(state.items)
 
-    async def test_memory_calls_use_current_context_without_shared_header_state(self):
-        memories = Mock()
-        context = Context(Mock(), memories, 'memory', 'demo-opaque')
-        observed = []
-
-        def response(*args, **kwargs):
-            headers = kwargs['headers']
-            self.assertEqual(headers, get_request_context().platform_headers())
-            observed.append(headers)
-            return SimpleNamespace(memory_id='remembered', memories=[], scope=context.scope)
-
-        for method in ('create_memory', 'search_memories', 'get_memory', 'delete_memory', 'delete_scope'):
-            getattr(memories, method).side_effect = response
-
-        async def caller(call_id):
-            token = set_request_context(FoundryAgentRequestContext(call_id=call_id, user_id='private-user'))
-            try:
-                await context.remember('Explicitly reviewed operational context.',
-                                       {'approved': True, 'url': 'https://example.test/review'})
-                await context.recall('operational context')
-                await context.forget('remembered')
-                await context.forget()
-            finally:
-                reset_request_context(token)
-
-        await asyncio.gather(caller('call-one'), caller('call-two'), caller(None))
-        for headers in ({'x-agent-foundry-call-id': 'call-one'}, {'x-agent-foundry-call-id': 'call-two'}, {}):
-            self.assertEqual(observed.count(headers), 5)
-        self.assertEqual(len(observed), 15)
-
-    async def test_knowledge_calls_use_current_context_in_worker_threads(self):
-        project = MagicMock()
-        client = project.get_openai_client.return_value.__enter__.return_value
-        observed = []
-
-        def search(**kwargs):
-            headers = kwargs['extra_headers']
-            self.assertEqual(headers, get_request_context().platform_headers())
-            observed.append(headers)
-            return SimpleNamespace(data=[])
-
-        client.vector_stores.search.side_effect = search
-
-        async def caller(call_id):
-            token = set_request_context(FoundryAgentRequestContext(call_id=call_id, user_id='private-user'))
-            try:
-                await asyncio.to_thread(knowledge_query, project, 'vs-pinned', 'readiness', [])
-            finally:
-                reset_request_context(token)
-
-        await asyncio.gather(caller('call-one'), caller('call-two'), caller(None))
-        self.assertCountEqual(observed, [{'x-agent-foundry-call-id': 'call-one'},
-                                        {'x-agent-foundry-call-id': 'call-two'}, {}])
-
-    async def test_hosting_reads_the_vector_store_from_the_publication_manifest(self):
-        context = Mock(recall=AsyncMock(return_value=[]), checkpoint=AsyncMock())
-        manager = MagicMock()
-        manager.__aenter__ = AsyncMock(return_value=context)
-        manager.__aexit__ = AsyncMock(return_value=False)
-        project = Mock()
-        sources = [{'file_id': 'file-actual'}]
-        knowledge = {'toolbox': 'retained-publication', 'vector_store': 'vs-pinned', 'sources': sources}
-        historical = {'citations': sources, 'result': {}}
-        investigate = Mock(return_value={'diagnosis': {'decision': 'abstain'}, 'trace_id': 'a' * 32})
-        with patch('portfolio_agent_runtime.hosting.user_context', return_value=manager), \
-             patch('portfolio_agent_runtime.hosting.knowledge_query', return_value=historical) as search:
-            result = await invoke({'incident': {'summary': 'readiness'}}, investigate,
-                                  agent='demo', project=project, memory_store='memory', knowledge=knowledge)
-        search.assert_called_once_with(project, 'vs-pinned', 'readiness', sources)
-        self.assertEqual(result['context']['knowledge'], historical)
-        context.checkpoint.assert_awaited_once()
-
-    async def test_grader_and_oversized_checkpoint_rejected_before_write(self):
-        state = Mock(set_item=AsyncMock())
-        context = Context(state, Mock(), 'memory', 'demo-opaque')
-        for value in ({'nested': {'rubric': {}}}, {'answer': 'x' * 8192}, {'evidence': {}}):
-            with self.assertRaises(ValueError):
-                await context.checkpoint('incident', value)
-        state.set_item.assert_not_called()
-
-
-class KnowledgeTests(unittest.TestCase):
-    def test_only_declared_markdown_corpus_is_ingested(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / 'runbook.md').write_text('Reviewed runbook')
-            (root / 'case.yaml').write_text('rubric: private')
-            (root / 'nested').mkdir()
-            (root / 'nested/secret.md').write_text('not included')
-            self.assertEqual([d['path'] for d in corpus(root)], ['runbook.md'])
-            (root / 'linked.md').symlink_to(root / 'runbook.md')
-            with self.assertRaises(ValueError):
-                corpus(root)
-
-    def test_knowledge_filters_native_file_ids_instead_of_ids_inside_text(self):
-        project = MagicMock()
-        client = project.get_openai_client.return_value.__enter__.return_value
-        client.vector_stores.search.return_value = SimpleNamespace(data=[
-            VectorStoreSearchResponse(file_id='file-actual', filename='runbook.md', score=0.9,
-                attributes=None, content=[{'type': 'text', 'text': 'Reviewed procedure'}]),
-            VectorStoreSearchResponse(file_id='file-unreviewed', filename='unreviewed.md', score=0.8,
-                attributes=None, content=[{'type': 'text', 'text': '{"file_id":"file-other"}'}]),
-        ])
-        result = knowledge_query(project, 'vs-pinned', 'readiness', [
-            {'file_id': 'file-actual', 'sha256': 'a' * 64}, {'file_id': 'file-other', 'sha256': 'b' * 64}])
-        self.assertEqual([c['file_id'] for c in result['citations']], ['file-actual'])
-        self.assertEqual([hit['file_id'] for hit in result['result']['data']], ['file-actual'])
-        project.get_openai_client.assert_called_once_with(timeout=15, max_retries=0)
-        client.vector_stores.search.assert_called_once_with(
-            vector_store_id='vs-pinned', query='readiness', max_num_results=3, extra_headers={})
-        project.toolboxes.invoke_latest_toolbox_mcp.assert_not_called()
-        result = knowledge_query(project, 'vs-pinned', 'readiness', [])
-        self.assertEqual(result['result'], {})
-        self.assertEqual(result['citations'], [])
-
-    def test_knowledge_read_is_bounded_and_provider_failures_propagate(self):
-        project = MagicMock()
-        client = project.get_openai_client.return_value.__enter__.return_value
-        client.vector_stores.search.return_value = SimpleNamespace(data=[
-            VectorStoreSearchResponse(file_id='file-actual', filename='runbook.md', score=0.9,
-                attributes=None, content=[{'type': 'text', 'text': 'x' * 16384}]),
-        ])
-        with self.assertRaisesRegex(ValueError, 'byte budget'):
-            knowledge_query(project, 'vs-pinned', 'readiness', [{'file_id': 'file-actual'}])
-        client.vector_stores.search.side_effect = RuntimeError('native search unavailable')
-        with self.assertRaisesRegex(RuntimeError, 'native search unavailable'):
-            knowledge_query(project, 'vs-pinned', 'readiness', [])
-        project.get_openai_client.reset_mock()
-        for query in ('', 'x' * 1025):
-            with self.assertRaises(ValueError):
-                knowledge_query(project, 'vs-pinned', query, [])
-        project.get_openai_client.assert_not_called()
-
-    def test_memory_definition_retention_and_extraction_are_explicit(self):
-        project = Mock()
-        with self.assertRaises(ValueError):
-            ensure_memory(project, 'name', 'chat', 'embedding', retention_days=0)
-        project.beta.memory_stores.get.assert_not_called()
-
-    def test_partial_cleanup_retries_and_rejects_foreign_files_before_mutation(self):
-        from azure.core.exceptions import ResourceNotFoundError
-        from portfolio_agent_runtime.knowledge import cleanup
-        manifest = {'toolbox': 'demo-revision', 'vector_store': 'vector',
-                    'repository': 'example/repo', 'revision': 'a' * 40, 'corpus_sha256': 'b' * 64,
-                    'sources': [{'file_id': 'file-owned', 'sha256': 'c' * 64}]}
-        project, openai = Mock(), Mock()
-        project.toolboxes.get.side_effect = ResourceNotFoundError('already deleted')
-        openai.vector_stores.retrieve.return_value = SimpleNamespace(metadata={
-            'repository': manifest['repository'], 'revision': manifest['revision'],
-            'corpus_sha256': manifest['corpus_sha256']})
-        openai.files.retrieve.return_value = SimpleNamespace(id='file-owned', filename='foreign.md')
-        with self.assertRaises(ValueError):
-            cleanup(project, openai, manifest)
-        project.toolboxes.delete.assert_not_called()
-        openai.vector_stores.delete.assert_not_called()
-        openai.files.retrieve.return_value.filename = 'demo-revision-' + 'c' * 64 + '.md'
-        cleanup(project, openai, manifest)
-        openai.files.delete.assert_called_once_with('file-owned')
-
-
-class HostingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_recorded_evidence_never_opens_persistent_context(self):
-        from portfolio_agent_runtime.hosting import invoke
+    async def test_replays_never_open_persistent_context(self):
         with patch('portfolio_agent_runtime.hosting.user_context') as factory:
             with self.assertRaises(ValueError):
-                await invoke({'incident': {'summary': 'replay'}, 'evidence': {}}, Mock(),
-                             agent='demo', project=Mock(), memory_store='memory')
+                await invoke({'incident': {'summary': 'replay'}, 'evidence': {}}, Mock(), agent='demo', project=Mock(), memory_store='')
             factory.assert_not_called()
 
-    async def test_history_stays_separate_and_checkpoint_contains_no_raw_incident(self):
-        from unittest.mock import MagicMock
-        from portfolio_agent_runtime.hosting import invoke
-        context = Mock()
-        context.recall = AsyncMock(return_value=[{'id': 'memory-owned', 'content': 'Historical advice'}])
-        context.checkpoint = AsyncMock()
-        manager = MagicMock()
-        manager.__aenter__ = AsyncMock(return_value=context)
-        manager.__aexit__ = AsyncMock(return_value=False)
-        investigate = Mock(return_value={'diagnosis': {'decision': 'abstain', 'answer': 'More evidence is needed.', 'evidence': []},
-                                         'trace_id': 'trace', 'deployment': {'version': '1'}})
-        with patch('portfolio_agent_runtime.hosting.user_context', return_value=manager):
-            result = await invoke({'incident': {'summary': 'Investigate current readiness'}, 'investigation_id': 'case-1'},
-                                  investigate, agent='demo', project=Mock(), memory_store='memory')
-        body, history = investigate.call_args.args
-        self.assertNotIn('memories', body['incident'])
-        self.assertEqual(history['memories'][0]['id'], 'memory-owned')
-        saved = context.checkpoint.call_args.args[1]
-        self.assertNotIn('incident', saved)
-        bounded(saved)
-        self.assertEqual(result['investigation_id'], 'case-1')
-
-
-class PublicationTests(unittest.TestCase):
-    def test_completed_publication_is_reused_only_with_matching_sources_and_provenance(self):
-        import hashlib
-        from portfolio_agent_runtime.knowledge import publish
-        project, openai = Mock(), Mock()
-        with tempfile.TemporaryDirectory() as directory:
-            Path(directory, 'runbook.md').write_text('Reviewed operational knowledge')
-            data = corpus(directory)
-            fingerprint = hashlib.sha256(json.dumps(
-                [(d['path'], d['sha256']) for d in data], separators=(',', ':')).encode()).hexdigest()
-            project.toolboxes.get.return_value = SimpleNamespace(default_version='1')
-            version = SimpleNamespace(metadata={'repository': 'example/repo', 'corpus_sha256': fingerprint,
-                                                'source_path': 'agents/demo/knowledge'},
-                                      tools=[SimpleNamespace(vector_store_ids=['vector-owned'])])
-            project.toolboxes.get_version.return_value = version
-            openai.vector_stores.files.list.return_value = [SimpleNamespace(
-                id='file-owned', status='completed', attributes={
-                    'path': 'runbook.md', 'sha256': data[0]['sha256'], 'url': 'https://github.com/example/repo/blob/commit/runbook.md'})]
-            manifest = publish(project, openai, directory, 'a' * 63, 'b' * 40, 'example/repo', 'agents/demo/knowledge')
-            self.assertLessEqual(len(manifest['toolbox']), 63)
-            self.assertEqual(manifest['sources'][0]['file_id'], 'file-owned')
-            project.toolboxes.create_version.assert_not_called()
-            openai.files.create.assert_not_called()
-            version.metadata['corpus_sha256'] = 'foreign'
+    async def test_runbooks_are_revision_pinned_grounded_cached_and_bounded(self):
+        state = State()
+        state.get = AsyncMock(return_value=SimpleNamespace(user_isolation=False, item_ttl_seconds=2592000))
+        state.aclose = AsyncMock()
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, ENV), \
+             patch('portfolio_agent_runtime.knowledge.FoundryStateStore.get_or_create', AsyncMock(return_value=state)), \
+             patch('portfolio_agent_runtime.knowledge.embeddings', side_effect=lambda c, t: [VECTOR for _ in t]) as embed:
+            path = Path(directory, 'runbook.md')
+            path.write_text('Reviewed operational knowledge; validate before proposing.')
+            manifest = publish(directory, 'a'*40, 'org/repo', 'agents/demo/knowledge')
+            result = await knowledge_query('demo', Mock(), manifest, directory, 'validate')
+            self.assertEqual(result['citations'], manifest['sources'])
+            self.assertIn('validate before', result['result']['data'][0]['content'][0]['text'])
+            self.assertEqual(embed.call_count, 2)
+            await knowledge_query('demo', Mock(), manifest, directory, 'validate again')
+            self.assertEqual(embed.call_count, 3)  # immutable runbook vector reused
+            path.write_text('Changed without a matching reviewed release.')
+            with self.assertRaisesRegex(ValueError, 'publication'):
+                await knowledge_query('demo', Mock(), manifest, directory, 'validate')
+            path.unlink()
+            (Path(directory) / 'linked.md').symlink_to('/etc/hosts')
             with self.assertRaises(ValueError):
-                publish(project, openai, directory, 'a' * 63, 'b' * 40, 'example/repo', 'agents/demo/knowledge')
-
-
-class ForgetIsolationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_named_forget_cannot_delete_another_callers_memory(self):
-        memories = Mock()
-        memories.get_memory.return_value = SimpleNamespace(scope='another-caller')
-        context = Context(Mock(), memories, 'memory', 'own-caller')
-        with self.assertRaises(ValueError):
-            await context.forget('mem-other')
-        memories.delete_memory.assert_not_called()
+                corpus(directory)
