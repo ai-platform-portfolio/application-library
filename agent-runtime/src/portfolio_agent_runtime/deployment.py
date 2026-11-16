@@ -3,16 +3,18 @@ import argparse
 import json
 import os
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 import subprocess
 import ssl
 import tempfile
 from urllib.parse import urlsplit
 
+import yaml
 from azure.ai.projects import AIProjectClient
 from azure.identity import DefaultAzureCredential
-import yaml
+from azure.core.exceptions import ResourceNotFoundError
 
-from .knowledge import ensure_memory, publish
+from .knowledge import publish
 from .agent import model_settings
 
 
@@ -29,19 +31,36 @@ def configure(path):
             raise ValueError('Knowledge must be inside the agent project')
         source_path = directory.resolve().relative_to(Path(os.environ['GITHUB_WORKSPACE']).resolve()).as_posix()
         repository, revision = os.environ['GITHUB_REPOSITORY'], os.environ['SOURCE_REVISION']
+        # Metadata-only discovery lets a fresh repository/rebuild start without
+        # inventing a legacy store. Existing notes require an explicit deadline.
         memory_name = environment + '-memory'
         with DefaultAzureCredential() as credential, AIProjectClient(
                 endpoint=os.environ['FOUNDRY_PROJECT_ENDPOINT'], credential=credential,
                 connection_timeout=5, read_timeout=15, retry_total=0) as project:
-            ensure_memory(project, memory_name, memory.get('chat_model', config['model']), memory.get('embedding_model', 'embedding'),
-                          memory.get('retention_days', 30))
-            with project.get_openai_client() as openai:
-                manifest = publish(project, openai, directory, environment, revision, repository, source_path)
+            try:
+                project.beta.memory_stores.get(memory_name)
+            except ResourceNotFoundError:
+                memory_name = ''
+        if memory_name:
+            until = datetime.fromisoformat(os.environ['LEGACY_MEMORY_UNTIL'].replace('Z', '+00:00'))
+            if until.tzinfo is None or until > datetime.now(timezone.utc) + timedelta(days=30):
+                raise ValueError('Declare a fixed legacy deadline within 30 days of cutover')
+        manifest = publish(directory, revision, repository, source_path)
         # The caller uploads this with its existing release/evaluation artifacts.
         record = Path(os.environ['RUNNER_TEMP']) / 'acceptance' / 'knowledge.json'
         record.parent.mkdir(parents=True, exist_ok=True)
         record.write_text(json.dumps(manifest, indent=2))
+    if memory.get('enabled'):
+        for capability in ('coding', 'embedding'):
+            selected = model_settings(capability=capability)
+            for field in ('MODEL_DEPLOYMENT_NAME', 'MODEL_API_KEY_SECRET_URI', 'MODEL_API_KEY'):
+                connection[capability.upper() + '_' + field] = selected[field]
+        version = os.getenv('EMBEDDING_MODEL_VERSION', '')
+        if not version:
+            raise ValueError('Declare the pinned embedding model version')
+        connection['EMBEDDING_MODEL_VERSION'] = version
     values = {'MEMORY_STORE_NAME': memory_name,
+              'LEGACY_MEMORY_UNTIL': os.getenv('LEGACY_MEMORY_UNTIL', ''),
               'KNOWLEDGE_MANIFEST_JSON': json.dumps(manifest, separators=(',', ':')),
               **connection,
               'METRICS_URL': os.getenv('METRICS_URL') or '',

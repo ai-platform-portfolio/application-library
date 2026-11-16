@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 import httpx
 from openai import AuthenticationError, OpenAI
 
-from portfolio_agent_runtime.agent import model_client, model_settings, SecretKey
+from portfolio_agent_runtime.agent import model_client, model_settings
 
 
 class ConnectionTests(unittest.TestCase):
@@ -125,3 +125,35 @@ class ConnectionTests(unittest.TestCase):
             self.assertEqual(model_settings('chat')['MODEL_API_KEY'], '')
         with patch.dict(os.environ, {'MODEL_DEPLOYMENT_NAME': ' '}, clear=True), self.assertRaises(ValueError):
             model_settings('chat')
+
+
+class CapabilityTests(unittest.TestCase):
+    def test_capability_cannot_borrow_the_default_key(self):
+        env = {'MODEL_CONNECTION_MODE': 'gateway', 'MODEL_AUTH_METHOD': 'api_key',
+               'MODEL_BASE_URL': 'https://gateway.test/v1', 'MODEL_DEPLOYMENT_NAME': 'reasoning',
+               'MODEL_API_KEY': 'default-key', 'CODING_MODEL_DEPLOYMENT_NAME': 'coding'}
+        with patch.dict(os.environ, env, clear=True), self.assertRaises(ValueError):
+            model_settings(capability='coding')
+        env['CODING_MODEL_API_KEY_SECRET_URI'] = 'https://test.vault.azure.net/secrets/coding'
+        with patch.dict(os.environ, env, clear=True):
+            settings = model_settings(capability='coding')
+            self.assertEqual(settings['MODEL_DEPLOYMENT_NAME'], 'coding')
+            self.assertEqual(settings['MODEL_API_KEY'], '')
+
+    def test_embedding_dimension_and_input_order_are_verified(self):
+        from portfolio_agent_runtime.agent import embeddings
+        from types import SimpleNamespace
+        env = {'MODEL_CONNECTION_MODE': 'gateway', 'MODEL_AUTH_METHOD': 'api_key',
+               'MODEL_BASE_URL': 'https://gateway.test/v1', 'EMBEDDING_MODEL_DEPLOYMENT_NAME': 'embedding',
+               'EMBEDDING_MODEL_API_KEY': 'embedding-key'}
+        client = Mock()
+        client.embeddings.create.return_value = SimpleNamespace(data=[SimpleNamespace(index=0, embedding=[1.0]*256)])
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(len(embeddings(client, ['reviewed note'])[0]), 256)
+            client.embeddings.create.assert_called_once_with(model='embedding', input=['reviewed note'], dimensions=256)
+            client.embeddings.create.return_value.data[0].embedding = [float('nan')]*256
+            with self.assertRaises(ValueError):
+                embeddings(client, ['reviewed note'])
+            client.embeddings.create.return_value.data[0].index = 1
+            with self.assertRaises(ValueError):
+                embeddings(client, ['reviewed note'])
