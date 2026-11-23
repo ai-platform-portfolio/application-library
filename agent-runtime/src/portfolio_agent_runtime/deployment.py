@@ -18,6 +18,20 @@ from .knowledge import publish
 from .agent import model_settings
 
 
+def telemetry_connection():
+    connection = json.loads(os.environ.get('TELEMETRY_CONNECTION') or '{}')
+    if (not isinstance(connection, dict) or set(connection) != {'endpoint', 'scope', 'queries'}
+            or not isinstance(connection['endpoint'], str)
+            or not isinstance(connection['scope'], str) or not connection['scope'].endswith('/.default')
+            or not isinstance(connection['queries'], dict) or not connection['queries']
+            or any(not isinstance(query, str) or not query for query in connection['queries'].values())):
+        raise ValueError('Telemetry requires a connection with an endpoint, token scope and fixed queries')
+    endpoint = urlsplit(connection['endpoint'])
+    if endpoint.scheme != 'https' or not endpoint.hostname or endpoint.username is not None or endpoint.query or endpoint.fragment:
+        raise ValueError('Telemetry endpoint must use validated HTTPS')
+    return json.dumps(connection, separators=(',', ':'))
+
+
 def configure(path):
     config = yaml.safe_load(Path(path).read_text())
     connection = model_settings(config['model'])
@@ -66,7 +80,9 @@ def configure(path):
               'METRICS_URL': os.getenv('METRICS_URL') or '',
               'METRICS_TOKEN_SCOPE': os.getenv('METRICS_TOKEN_SCOPE') or '',
               'AGENT_DIAGNOSTICS_BACKEND': os.getenv('AGENT_DIAGNOSTICS_BACKEND') or 'provided'}
-    keys = ('KUBE_API_URL', 'KUBE_CA_PEM', 'KUBE_ALLOWED_NAMESPACE', 'KUBE_ALLOWED_WORKLOAD')
+    target_keys = ('KUBE_ALLOWED_NAMESPACE', 'KUBE_ALLOWED_WORKLOAD')
+    keys = ('KUBE_API_URL', 'KUBE_CA_PEM', *target_keys)
+    values['TELEMETRY_CONNECTION'] = ''
     if values['AGENT_DIAGNOSTICS_BACKEND'] == 'kubernetes':
         values.update({key: os.environ[key] for key in keys})
         if not all(values[key] for key in keys):
@@ -75,10 +91,16 @@ def configure(path):
         if endpoint.scheme != 'https' or not endpoint.hostname or endpoint.username is not None or endpoint.query or endpoint.fragment:
             raise ValueError('Kubernetes endpoint must use validated HTTPS')
         ssl.create_default_context(cadata=values['KUBE_CA_PEM'])
+    elif values['AGENT_DIAGNOSTICS_BACKEND'] == 'telemetry':
+        values.update(KUBE_API_URL='', KUBE_CA_PEM='')
+        values.update({key: os.getenv(key, '') for key in target_keys})
+        if not all(values[key] for key in target_keys):
+            raise ValueError('Telemetry requires an explicit workload namespace and name')
+        values['TELEMETRY_CONNECTION'] = telemetry_connection()
     elif values['AGENT_DIAGNOSTICS_BACKEND'] == 'provided':
         values.update({key: '' for key in keys})
     else:
-        raise ValueError('Diagnostics backend must be provided or kubernetes')
+        raise ValueError('Diagnostics backend must be provided, kubernetes or telemetry')
     # Native --file keeps credentials out of process arguments. The temporary file
     # is owner-only and removed even on failure; azd's ignored environment is local.
     with tempfile.NamedTemporaryFile(mode='w', suffix='.env') as variables:
