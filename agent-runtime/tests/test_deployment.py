@@ -11,6 +11,60 @@ from portfolio_agent_runtime.deployment import configure
 
 
 class DeploymentTests(unittest.TestCase):
+    def test_predeploy_preserves_backend_specific_configuration(self):
+        connection = {'endpoint': 'https://telemetry.test/query/consumer',
+                      'scope': 'api://telemetry/.default',
+                      'queries': {'events': 'query=approved&since=5m&limit=20'}}
+        target = {'KUBE_ALLOWED_NAMESPACE': 'preview', 'KUBE_ALLOWED_WORKLOAD': 'api'}
+        kubernetes = {'KUBE_API_URL': 'https://kubernetes.test', 'KUBE_CA_PEM': 'ca', **target}
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'agent.yaml'
+            config.write_text('model: reasoning\n')
+            for backend in ('provided', 'kubernetes', 'telemetry'):
+                with self.subTest(backend=backend):
+                    env = {'AZURE_ENV_NAME': 'repo-agent', 'AGENT_DIAGNOSTICS_BACKEND': backend,
+                           'TELEMETRY_CONNECTION': json.dumps(connection), **kubernetes}
+                    captured = {}
+
+                    def capture(args, **kwargs):
+                        path = Path(args[args.index('--file') + 1])
+                        captured.update({key: json.loads(value) for key, value in
+                                         (line.split('=', 1) for line in path.read_text().splitlines())})
+
+                    with patch.dict(os.environ, env, clear=True), \
+                         patch('portfolio_agent_runtime.deployment.model_settings', return_value={}), \
+                         patch('portfolio_agent_runtime.deployment.ssl.create_default_context') as tls, \
+                         patch('portfolio_agent_runtime.deployment.subprocess.run', side_effect=capture):
+                        configure(config)
+                    self.assertEqual(captured['AGENT_DIAGNOSTICS_BACKEND'], backend)
+                    for key, value in kubernetes.items():
+                        expected = value if backend == 'kubernetes' or (backend == 'telemetry' and key in target) else ''
+                        self.assertEqual(captured[key], expected)
+                    if backend == 'kubernetes':
+                        tls.assert_called_once_with(cadata='ca')
+                    else:
+                        tls.assert_not_called()
+                    if backend == 'telemetry':
+                        self.assertEqual(json.loads(captured['TELEMETRY_CONNECTION']), connection)
+                    else:
+                        self.assertEqual(captured['TELEMETRY_CONNECTION'], '')
+
+    def test_predeploy_rejects_non_https_telemetry_before_azd(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'agent.yaml'
+            config.write_text('model: reasoning\n')
+            env = {'AZURE_ENV_NAME': 'repo-agent', 'AGENT_DIAGNOSTICS_BACKEND': 'telemetry',
+                   'KUBE_ALLOWED_NAMESPACE': 'preview', 'KUBE_ALLOWED_WORKLOAD': 'api',
+                   'TELEMETRY_CONNECTION': json.dumps({'endpoint': 'http://telemetry.test/query',
+                                                        'scope': 'api://telemetry/.default',
+                                                        'queries': {'events': 'query=approved'}})}
+            with patch.dict(os.environ, env, clear=True), \
+                 patch('portfolio_agent_runtime.deployment.model_settings', return_value={}), \
+                 patch('portfolio_agent_runtime.deployment.subprocess.run') as azd, \
+                 self.assertRaisesRegex(ValueError, 'Telemetry endpoint must use validated HTTPS'):
+                configure(config)
+            azd.assert_not_called()
+
     def test_gateway_metadata_reaches_native_environment_without_model_processing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
